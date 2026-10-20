@@ -1,7 +1,7 @@
 name: blunder
 description: A lightweight beginner-friendly polygon modeler.
 publish_to: none
-version: 0.1.0+1
+version: 1.0.0+2
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  file_selector: ^1.0.3
 
 dev_dependencies:
   flutter_test:
