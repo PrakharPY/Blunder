@@ -29,6 +29,15 @@ class MeshModel {
 
   factory MeshModel.empty() => MeshModel._([], []);
 
+  factory MeshModel.fromData(
+    Iterable<Vec3> positions,
+    Iterable<MeshFace> meshFaces,
+  ) =>
+      MeshModel._(
+        positions.map(MeshVertex.new).toList(),
+        meshFaces.toList(),
+      );
+
   factory MeshModel.starterPlane() {
     final mesh = MeshModel.empty();
     mesh.vertices.addAll([

@@ -1,12 +1,15 @@
 import 'dart:math' as math;
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'mesh.dart';
+import 'model_io.dart';
 
 void main() {
   runApp(const BlunderApp());
@@ -44,11 +47,22 @@ enum ViewPreset { free, front, back, right, left, top, bottom }
 
 enum MeshAxis { x, y, z }
 
+enum ViewStyle { solid, textured, wireframe }
+
+enum _UnsavedChoice { save, discard, cancel }
+
 class SceneObject {
-  SceneObject(this.name, this.mesh);
+  SceneObject(
+    this.name,
+    this.mesh, {
+    this.texturePath,
+    this.textureImage,
+  });
 
   final String name;
   final MeshModel mesh;
+  String? texturePath;
+  ui.Image? textureImage;
 }
 
 class _ViewBasis {
@@ -84,21 +98,31 @@ class _ModelerScreenState extends State<ModelerScreen> {
   double _yaw = -0.55;
   double _pitch = 0.68;
   double _zoom = 1;
+  static const double _minZoom = 0.035;
+  static const double _maxZoom = 12;
   double _gestureZoomStart = 1;
   double _referenceOpacity = 0.35;
   Offset _pan = Offset.zero;
   Offset _gestureAnchor = Offset.zero;
   int _draggingUvCorner = -1;
+  ViewStyle _viewStyle = ViewStyle.solid;
+  String? _currentFilePath;
+  bool _isDirty = false;
+  bool _isSaving = false;
 
   @override
   void dispose() {
     for (final image in _referenceImages.values) {
       image.dispose();
     }
+    for (final object in _objects) {
+      object.textureImage?.dispose();
+    }
     super.dispose();
   }
 
   void _resetPlane() {
+    _objects[_activeObjectIndex].textureImage?.dispose();
     setState(() {
       _objects[_activeObjectIndex] = SceneObject(
         _objects[_activeObjectIndex].name,
@@ -109,6 +133,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _tool = ActiveTool.select;
       _lockedAxis = null;
       _page = EditorPage.model;
+      _isDirty = true;
     });
   }
 
@@ -127,6 +152,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _selectedFace = 0;
       _tool = ActiveTool.select;
       _lockedAxis = null;
+      _isDirty = true;
     });
   }
 
@@ -233,6 +259,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ..addAll(duplicated);
         _tool = ActiveTool.move;
         _lockedAxis = null;
+        _isDirty = true;
       });
       return;
     }
@@ -244,6 +271,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         _selectedFace = duplicatedFace;
         _tool = ActiveTool.move;
         _lockedAxis = null;
+        _isDirty = true;
       });
       return;
     }
@@ -291,6 +319,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         selected,
         Vec3(delta.x * amount, delta.y * amount, delta.z * amount),
       );
+      _isDirty = true;
     });
   }
 
@@ -299,6 +328,28 @@ class _ModelerScreenState extends State<ModelerScreen> {
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final key = event.logicalKey;
+    if (HardwareKeyboard.instance.isControlPressed) {
+      if (key == LogicalKeyboardKey.keyS) {
+        if (HardwareKeyboard.instance.isShiftPressed) {
+          _saveScene(saveAs: true);
+        } else {
+          _saveScene();
+        }
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyO) {
+        _openScene();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyN) {
+        _newScene();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyE) {
+        _exportObj();
+        return KeyEventResult.handled;
+      }
+    }
     if (key == LogicalKeyboardKey.keyM) {
       _toggleMoveTool();
       return KeyEventResult.handled;
@@ -398,6 +449,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _selectedFace = _mesh.faces.length - 1;
       _mode = EditMode.face;
       _tool = ActiveTool.select;
+      _isDirty = true;
     });
   }
 
@@ -408,6 +460,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _selectedFace = _mesh.faces.isEmpty
           ? null
           : (face < _mesh.faces.length ? face : _mesh.faces.length - 1);
+      _isDirty = true;
     });
   }
 
@@ -415,10 +468,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
     if (_tool == ActiveTool.addVertex && _mode == EditMode.vertex) {
       final index = _mesh.addVertex(_worldPosition(point, size));
       setState(() {
-        _selectedVertices
-          ..clear()
-          ..add(index);
-        _tool = ActiveTool.select;
+        _selectedVertices.add(index);
+        _isDirty = true;
       });
       return;
     }
@@ -460,6 +511,260 @@ class _ModelerScreenState extends State<ModelerScreen> {
     );
   }
 
+  double _zoomForWheel(double scrollDelta) =>
+      (_zoom * math.exp(-scrollDelta * 0.0015))
+          .clamp(_minZoom, _maxZoom)
+          .toDouble();
+
+  void _zoomBy(double factor) {
+    setState(() {
+      _zoom = (_zoom * factor).clamp(_minZoom, _maxZoom).toDouble();
+    });
+  }
+
+  void _fitScene(Size size) {
+    final points = _objects
+        .expand((object) => object.mesh.vertices)
+        .map((vertex) => vertex.position)
+        .toList();
+    if (points.isEmpty) return;
+    final basis = _viewBasis();
+    final horizontal = points.map((point) => _dot(point, basis.right)).toList();
+    final vertical = points.map((point) => _dot(point, basis.up)).toList();
+    final minX = horizontal.reduce(math.min);
+    final maxX = horizontal.reduce(math.max);
+    final minY = vertical.reduce(math.min);
+    final maxY = vertical.reduce(math.max);
+    final spanX = math.max(maxX - minX, 0.25);
+    final spanY = math.max(maxY - minY, 0.25);
+    final scale = math.min(size.width, size.height).toDouble() * 0.27;
+    setState(() {
+      _zoom = (math.min(size.width / spanX, size.height / spanY) * 0.78 / scale)
+          .clamp(_minZoom, _maxZoom)
+          .toDouble();
+      _pan = Offset(
+        size.width / 2 - ((minX + maxX) / 2) * scale * _zoom,
+        size.height / 2 + ((minY + maxY) / 2) * scale * _zoom,
+      );
+    });
+  }
+
+  List<ModelMeshData> _documentData() => _objects
+      .map(
+        (object) => ModelMeshData(
+          name: object.name,
+          mesh: object.mesh,
+          texturePath: object.texturePath,
+        ),
+      )
+      .toList();
+
+  Future<void> _saveScene({bool saveAs = false}) async {
+    if (_isSaving) return;
+    var path = _currentFilePath;
+    if (saveAs || path == null) {
+      final location = await getSaveLocation(
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'Blunder project', extensions: ['pky']),
+        ],
+        suggestedName: 'Blunder_Scene.pky',
+        confirmButtonText: 'Save',
+      );
+      if (location == null) return;
+      path = location.path.toLowerCase().endsWith('.pky')
+          ? location.path
+          : '${location.path}.pky';
+    }
+    setState(() => _isSaving = true);
+    try {
+      await ModelIo.writePky(path, _documentData());
+      if (!mounted) return;
+      setState(() {
+        _currentFilePath = path;
+        _isDirty = false;
+      });
+      _showMessage('Saved ${File(path).uri.pathSegments.last}');
+    } catch (error) {
+      _showMessage('Could not save the scene: $error');
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  Future<void> _exportObj() async {
+    final location = await getSaveLocation(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Wavefront OBJ', extensions: ['obj']),
+      ],
+      suggestedName: 'Blunder_Export.obj',
+      confirmButtonText: 'Export',
+    );
+    if (location == null) return;
+    final path = location.path.toLowerCase().endsWith('.obj')
+        ? location.path
+        : '${location.path}.obj';
+    try {
+      await ModelIo.writeObj(path, _documentData());
+      if (mounted) _showMessage('Exported ${File(path).uri.pathSegments.last}');
+    } catch (error) {
+      if (mounted) _showMessage('Could not export OBJ: $error');
+    }
+  }
+
+  Future<void> _openScene() async {
+    if (!await _confirmUnsavedChanges()) return;
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Blunder project', extensions: ['pky']),
+      ],
+      confirmButtonText: 'Open',
+    );
+    if (file == null) return;
+    try {
+      final imported = await ModelIo.readPky(file.path);
+      final loadedObjects = <SceneObject>[];
+      for (final object in imported) {
+        var texturePath = object.texturePath;
+        if (texturePath != null && !File(texturePath).isAbsolute) {
+          texturePath = '${File(file.path).parent.path}\\$texturePath';
+        }
+        final textureImage =
+            texturePath != null && await File(texturePath).exists()
+                ? await _decodeImage(await File(texturePath).readAsBytes())
+                : null;
+        loadedObjects.add(
+          SceneObject(
+            object.name,
+            object.mesh,
+            texturePath: texturePath,
+            textureImage: textureImage,
+          ),
+        );
+      }
+      for (final object in _objects) {
+        object.textureImage?.dispose();
+      }
+      setState(() {
+        _objects
+          ..clear()
+          ..addAll(loadedObjects);
+        if (_objects.isEmpty) {
+          _objects.add(SceneObject('Mesh_1', MeshModel.empty()));
+        }
+        _activeObjectIndex = 0;
+        _selectedVertices.clear();
+        _selectedFace = _mesh.faces.isEmpty ? null : 0;
+        _tool = ActiveTool.select;
+        _lockedAxis = null;
+        _currentFilePath = file.path;
+        _isDirty = false;
+        _page = EditorPage.model;
+      });
+      _showMessage('Opened ${File(file.path).uri.pathSegments.last}');
+    } catch (error) {
+      _showMessage('Could not open PKY file: $error');
+    }
+  }
+
+  Future<bool> _confirmUnsavedChanges() async {
+    if (!_isDirty) return true;
+    final choice = await showDialog<_UnsavedChoice>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unsaved changes'),
+        content: const Text('Save changes to this scene before continuing?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, _UnsavedChoice.cancel),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, _UnsavedChoice.discard),
+            child: const Text('Discard'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _UnsavedChoice.save),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (choice == _UnsavedChoice.discard) return true;
+    if (choice == _UnsavedChoice.save) {
+      await _saveScene();
+      return !_isDirty;
+    }
+    return false;
+  }
+
+  Future<void> _newScene() async {
+    if (!await _confirmUnsavedChanges()) return;
+    for (final object in _objects) {
+      object.textureImage?.dispose();
+    }
+    setState(() {
+      _objects
+        ..clear()
+        ..add(SceneObject('Mesh_1', MeshModel.starterPlane()));
+      _activeObjectIndex = 0;
+      _selectedVertices.clear();
+      _selectedFace = 0;
+      _tool = ActiveTool.select;
+      _lockedAxis = null;
+      _currentFilePath = null;
+      _isDirty = false;
+      _page = EditorPage.model;
+      _zoom = 1;
+      _pan = Offset.zero;
+    });
+  }
+
+  Future<void> _exitApplication() async {
+    if (!await _confirmUnsavedChanges()) return;
+    exit(0);
+  }
+
+  Future<void> _loadTexture() async {
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(
+          label: 'Texture images',
+          extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp'],
+        ),
+      ],
+    );
+    if (file == null) return;
+    try {
+      final image = await _decodeImage(await File(file.path).readAsBytes());
+      final object = _objects[_activeObjectIndex];
+      object.textureImage?.dispose();
+      setState(() {
+        object.texturePath = file.path;
+        object.textureImage = image;
+        _isDirty = true;
+      });
+    } catch (error) {
+      if (mounted) _showMessage('Could not load texture: $error');
+    }
+  }
+
+  Future<ui.Image> _decodeImage(Uint8List bytes) async {
+    final codec = await ui.instantiateImageCodec(bytes);
+    try {
+      final frame = await codec.getNextFrame();
+      return frame.image;
+    } finally {
+      codec.dispose();
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
   int? _nearestVertex(Offset point, Size size) {
     int? nearest;
     var nearestDistance = 24.0;
@@ -498,6 +803,41 @@ class _ModelerScreenState extends State<ModelerScreen> {
       child: Scaffold(
         appBar: AppBar(
           titleSpacing: 18,
+          leadingWidth: 48,
+          leading: PopupMenuButton<String>(
+            tooltip: 'File menu',
+            icon: const Icon(Icons.menu_rounded),
+            onSelected: (value) {
+              switch (value) {
+                case 'new':
+                  _newScene();
+                case 'open':
+                  _openScene();
+                case 'save':
+                  _saveScene();
+                case 'saveAs':
+                  _saveScene(saveAs: true);
+                case 'export':
+                  _exportObj();
+                case 'exit':
+                  _exitApplication();
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(value: 'new', child: Text('New scene')),
+              const PopupMenuItem(value: 'open', child: Text('Open .pky…')),
+              const PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'save',
+                child: Text(_isSaving ? 'Saving…' : 'Save scene'),
+              ),
+              const PopupMenuItem(
+                  value: 'saveAs', child: Text('Save scene as…')),
+              const PopupMenuItem(value: 'export', child: Text('Export .obj…')),
+              const PopupMenuDivider(),
+              const PopupMenuItem(value: 'exit', child: Text('Exit')),
+            ],
+          ),
           title: const Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -627,10 +967,48 @@ class _ModelerScreenState extends State<ModelerScreen> {
               icon: Icons.image_outlined,
               onPressed: _loadReferenceImage,
             ),
+            const SizedBox(width: 8),
+            if (_page == EditorPage.model)
+              SegmentedButton<ViewStyle>(
+                segments: const [
+                  ButtonSegment(
+                    value: ViewStyle.solid,
+                    tooltip: 'Solid render',
+                    icon: Icon(Icons.circle_rounded, size: 16),
+                  ),
+                  ButtonSegment(
+                    value: ViewStyle.textured,
+                    tooltip: 'Texture preview',
+                    icon: Icon(Icons.texture_rounded, size: 16),
+                  ),
+                  ButtonSegment(
+                    value: ViewStyle.wireframe,
+                    tooltip: 'Wireframe',
+                    icon: Icon(Icons.grid_4x4_rounded, size: 16),
+                  ),
+                ],
+                selected: {_viewStyle},
+                onSelectionChanged: (selection) =>
+                    setState(() => _viewStyle = selection.first),
+              )
+            else ...[
+              _ToolButton(
+                label: _meshTextureLabel(),
+                icon: Icons.texture_rounded,
+                onPressed: _loadTexture,
+              ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  String _meshTextureLabel() {
+    final texture = _objects[_activeObjectIndex].texturePath;
+    return texture == null
+        ? 'Choose texture'
+        : File(texture).uri.pathSegments.last;
   }
 
   Widget _axisButton(MeshAxis axis) {
@@ -840,50 +1218,112 @@ class _ModelerScreenState extends State<ModelerScreen> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final size = Size(constraints.maxWidth, constraints.maxHeight);
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTapUp: (details) => _handleModelTap(details.localPosition, size),
-            onScaleStart: (details) {
-              _gestureAnchor = details.focalPoint;
-              _gestureZoomStart = _zoom;
-            },
-            onScaleUpdate: (details) {
-              if (details.pointerCount >= 2) {
-                setState(() {
-                  _pan += details.focalPoint - _gestureAnchor;
-                  _zoom = (_gestureZoomStart * details.scale)
-                      .clamp(0.45, 3.5)
-                      .toDouble();
-                  _gestureAnchor = details.focalPoint;
-                });
-              } else if (_tool == ActiveTool.move && _lockedAxis != null) {
-                _moveSelectedAlongAxis(details.focalPointDelta, size);
-              } else if (_tool != ActiveTool.addVertex &&
-                  _tool != ActiveTool.move) {
-                setState(() {
-                  _viewPreset = ViewPreset.free;
-                  _yaw += details.focalPointDelta.dx * 0.008;
-                  _pitch = (_pitch + details.focalPointDelta.dy * 0.008)
-                      .clamp(-1.45, 1.45)
-                      .toDouble();
-                });
+          return Listener(
+            onPointerSignal: (event) {
+              if (event is PointerScrollEvent) {
+                setState(() => _zoom = _zoomForWheel(event.scrollDelta.dy));
               }
             },
-            child: CustomPaint(
-              size: size,
-              painter: _ViewportPainter(
-                meshes: _objects.map((object) => object.mesh).toList(),
-                activeMeshIndex: _activeObjectIndex,
-                selectedVertices: _selectedVertices,
-                selectedFace: _selectedFace,
-                project: (point) => _project(point, size),
-                basis: _viewBasis(),
-                referenceImage: _referenceImages[_viewPreset],
-                referenceOpacity: _referenceOpacity,
+            child: GestureDetector(
+              key: const ValueKey('modelViewport'),
+              behavior: HitTestBehavior.opaque,
+              onTapUp: (details) =>
+                  _handleModelTap(details.localPosition, size),
+              onScaleStart: (details) {
+                _gestureAnchor = details.focalPoint;
+                _gestureZoomStart = _zoom;
+              },
+              onScaleUpdate: (details) {
+                if (details.pointerCount >= 2) {
+                  setState(() {
+                    _pan += details.focalPoint - _gestureAnchor;
+                    _zoom = (_gestureZoomStart * details.scale)
+                        .clamp(_minZoom, _maxZoom)
+                        .toDouble();
+                    _gestureAnchor = details.focalPoint;
+                  });
+                } else if (_tool == ActiveTool.move && _lockedAxis != null) {
+                  _moveSelectedAlongAxis(details.focalPointDelta, size);
+                } else if (_tool != ActiveTool.addVertex &&
+                    _tool != ActiveTool.move) {
+                  setState(() {
+                    _viewPreset = ViewPreset.free;
+                    _yaw += details.focalPointDelta.dx * 0.008;
+                    _pitch = (_pitch + details.focalPointDelta.dy * 0.008)
+                        .clamp(-1.45, 1.45)
+                        .toDouble();
+                  });
+                }
+              },
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CustomPaint(
+                    painter: _ViewportPainter(
+                      meshes: _objects.map((object) => object.mesh).toList(),
+                      textures: _objects
+                          .map((object) => object.textureImage)
+                          .toList(),
+                      activeMeshIndex: _activeObjectIndex,
+                      selectedVertices: _selectedVertices,
+                      selectedFace: _selectedFace,
+                      project: (point) => _project(point, size),
+                      basis: _viewBasis(),
+                      referenceImage: _referenceImages[_viewPreset],
+                      referenceOpacity: _referenceOpacity,
+                      viewStyle: _viewStyle,
+                      fade: ((_zoom - _minZoom) / 0.18).clamp(0.0, 1.0),
+                      showVertices: _mode == EditMode.vertex ||
+                          _viewStyle == ViewStyle.wireframe,
+                    ),
+                  ),
+                  Positioned(
+                    right: 12,
+                    top: 12,
+                    child: _zoomControls(size),
+                  ),
+                ],
               ),
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _zoomControls(Size size) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xE6171B23),
+        border: Border.all(color: const Color(0xFF394252)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: 'Zoom in',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _zoomBy(1.25),
+            icon: const Icon(Icons.add),
+          ),
+          Text(
+            '${(_zoom * 100).round()}%',
+            style: Theme.of(context).textTheme.labelSmall,
+          ),
+          IconButton(
+            tooltip: 'Zoom out',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _zoomBy(0.8),
+            icon: const Icon(Icons.remove),
+          ),
+          IconButton(
+            tooltip: 'Frame all meshes',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _fitScene(size),
+            icon: const Icon(Icons.fit_screen_rounded),
+          ),
+        ],
       ),
     );
   }
@@ -929,13 +1369,17 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       (details.localPosition.dx - origin.dx) / scale,
                       1 - (details.localPosition.dy - origin.dy) / scale,
                     );
-                    setState(() => _mesh.updateUv(faceIndex, corner, uv));
+                    setState(() {
+                      _mesh.updateUv(faceIndex, corner, uv);
+                      _isDirty = true;
+                    });
                   },
             onPanEnd: faceIndex == null ? null : (_) => _draggingUvCorner = -1,
             child: CustomPaint(
               size: size,
               painter: _UvPainter(
                 face: faceIndex == null ? null : _mesh.faces[faceIndex],
+                texture: _objects[_activeObjectIndex].textureImage,
               ),
             ),
           );
@@ -1000,9 +1444,12 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   String _statusText() {
     if (_page == EditorPage.uv) {
-      return _selectedFace == null
-          ? 'Select a face to edit its UVs'
-          : 'Face ${_selectedFace! + 1}  ·  Drag a corner to map';
+      final texture = _objects[_activeObjectIndex].texturePath;
+      return texture == null
+          ? 'Choose a texture, then drag UV corners over it'
+          : _selectedFace == null
+              ? 'Select a face to edit its UVs'
+              : 'Face ${_selectedFace! + 1}  ·  Drag a corner to map';
     }
     if (_tool == ActiveTool.addVertex) {
       return 'Tap the surface to place a vertex';
@@ -1085,6 +1532,7 @@ class _BottomNavButton extends StatelessWidget {
 class _ViewportPainter extends CustomPainter {
   _ViewportPainter({
     required this.meshes,
+    required this.textures,
     required this.activeMeshIndex,
     required this.selectedVertices,
     required this.selectedFace,
@@ -1092,9 +1540,13 @@ class _ViewportPainter extends CustomPainter {
     required this.basis,
     required this.referenceImage,
     required this.referenceOpacity,
+    required this.viewStyle,
+    required this.fade,
+    required this.showVertices,
   });
 
   final List<MeshModel> meshes;
+  final List<ui.Image?> textures;
   final int activeMeshIndex;
   final Set<int> selectedVertices;
   final int? selectedFace;
@@ -1102,6 +1554,12 @@ class _ViewportPainter extends CustomPainter {
   final _ViewBasis basis;
   final ui.Image? referenceImage;
   final double referenceOpacity;
+  final ViewStyle viewStyle;
+  final double fade;
+  final bool showVertices;
+
+  double _dot(Vec3 first, Vec3 second) =>
+      first.x * second.x + first.y * second.y + first.z * second.z;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1167,57 +1625,87 @@ class _ViewportPainter extends CustomPainter {
     }
 
     final edgePaint = Paint()
-      ..color = const Color(0xFF8DB6FF)
+      ..color = const Color(0xFFB8C5D8).withValues(alpha: fade)
       ..strokeWidth = 2.2
       ..style = PaintingStyle.stroke;
+    final faceDraws = <(double, int, int, MeshFace)>[];
     for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
       final mesh = meshes[meshIndex];
-      final active = meshIndex == activeMeshIndex;
       for (var faceIndex = 0; faceIndex < mesh.faces.length; faceIndex++) {
         final face = mesh.faces[faceIndex];
-        final points = face.vertices
-            .map((index) => project(mesh.vertices[index].position))
-            .toList();
-        final selected = active && faceIndex == selectedFace;
-        final path = Path()..addPolygon(points, true);
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = selected
-                ? const Color(0x664E8DFF)
-                : active
-                    ? const Color(0x553B87C6)
-                    : const Color(0x333B87C6)
-            ..style = PaintingStyle.fill,
-        );
-        canvas.drawPath(
-          path,
-          active
-              ? edgePaint
-              : (Paint()
-                ..color = const Color(0xFF64748B)
-                ..strokeWidth = 1.5
-                ..style = PaintingStyle.stroke),
-        );
+        final depth = face.vertices
+                .map((index) =>
+                    _dot(mesh.vertices[index].position, basis.normal))
+                .reduce((first, second) => first + second) /
+            face.vertices.length;
+        faceDraws.add((depth, meshIndex, faceIndex, face));
       }
-
-      if (!active) continue;
-      for (var i = 0; i < mesh.vertices.length; i++) {
-        final point = project(mesh.vertices[i].position);
-        final selected = selectedVertices.contains(i);
-        canvas.drawCircle(
-          point,
-          selected ? 7 : 5,
-          Paint()..color = selected ? const Color(0xFFFFC45C) : Colors.white,
-        );
-        canvas.drawCircle(
-          point,
-          selected ? 7 : 5,
+    }
+    faceDraws.sort((first, second) => first.$1.compareTo(second.$1));
+    for (final (_, meshIndex, faceIndex, face) in faceDraws) {
+      final mesh = meshes[meshIndex];
+      final active = meshIndex == activeMeshIndex;
+      final selected = active && faceIndex == selectedFace;
+      final points = face.vertices
+          .map((index) => project(mesh.vertices[index].position))
+          .toList();
+      final path = Path()..addPolygon(points, true);
+      if (viewStyle == ViewStyle.solid) {
+        canvas.drawPath(
+          path,
           Paint()
-            ..color = const Color(0xFF101319)
-            ..strokeWidth = 1.5
+            ..color =
+                (selected ? const Color(0xFF8B9BB5) : const Color(0xFF707985))
+                    .withValues(alpha: fade),
+        );
+      } else if (viewStyle == ViewStyle.textured) {
+        final texture = textures[meshIndex];
+        if (texture != null && face.uv.length == points.length) {
+          _drawTexturedFace(canvas, face, points, texture, fade);
+        } else {
+          canvas.drawPath(
+            path,
+            Paint()..color = const Color(0xFF707985).withValues(alpha: fade),
+          );
+        }
+        if (selected) {
+          canvas.drawPath(
+            path,
+            Paint()..color = const Color(0x334E8DFF).withValues(alpha: fade),
+          );
+        }
+      }
+      if (viewStyle == ViewStyle.wireframe) {
+        canvas.drawPath(path, edgePaint);
+      } else if (active && selected) {
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = const Color(0xFFE4B85C).withValues(alpha: fade)
+            ..strokeWidth = 2
             ..style = PaintingStyle.stroke,
         );
+      }
+    }
+
+    if (showVertices) {
+      for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
+        final mesh = meshes[meshIndex];
+        for (var index = 0; index < mesh.vertices.length; index++) {
+          final point = project(mesh.vertices[index].position);
+          final isActive = meshIndex == activeMeshIndex;
+          final isSelected = isActive && selectedVertices.contains(index);
+          final radius = isSelected ? 7.0 : 4.5;
+          canvas.drawCircle(
+            point,
+            radius,
+            Paint()
+              ..color = (isSelected
+                      ? const Color(0xFFFFC45C)
+                      : const Color(0xFFE3E9F0))
+                  .withValues(alpha: fade),
+          );
+        }
       }
     }
 
@@ -1231,6 +1719,93 @@ class _ViewportPainter extends CustomPainter {
       );
     }
     _drawAxis(canvas);
+  }
+
+  void _drawTexturedFace(
+    Canvas canvas,
+    MeshFace face,
+    List<Offset> destinationPoints,
+    ui.Image image,
+    double opacity,
+  ) {
+    final triangles = [
+      const [0, 1, 2],
+      const [0, 2, 3],
+    ];
+    for (final triangle in triangles) {
+      final source = triangle
+          .map(
+            (index) => Offset(
+              face.uv[index].dx * image.width,
+              (1 - face.uv[index].dy) * image.height,
+            ),
+          )
+          .toList();
+      final destination =
+          triangle.map((index) => destinationPoints[index]).toList();
+      final transform = _affineTransform(source, destination);
+      if (transform == null) continue;
+      final clip = Path()..addPolygon(destination, true);
+      canvas
+        ..save()
+        ..clipPath(clip)
+        ..transform(transform);
+      canvas.drawImage(
+        image,
+        Offset.zero,
+        Paint()
+          ..color = Colors.white.withValues(alpha: opacity)
+          ..filterQuality = FilterQuality.medium,
+      );
+      canvas.restore();
+    }
+  }
+
+  Float64List? _affineTransform(List<Offset> source, List<Offset> destination) {
+    final x1 = source[0].dx;
+    final y1 = source[0].dy;
+    final x2 = source[1].dx;
+    final y2 = source[1].dy;
+    final x3 = source[2].dx;
+    final y3 = source[2].dy;
+    final determinant = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2);
+    if (determinant.abs() < 1e-10) return null;
+    final u1 = destination[0].dx;
+    final u2 = destination[1].dx;
+    final u3 = destination[2].dx;
+    final v1 = destination[0].dy;
+    final v2 = destination[1].dy;
+    final v3 = destination[2].dy;
+    final a = (u1 * (y2 - y3) + u2 * (y3 - y1) + u3 * (y1 - y2)) / determinant;
+    final c = (u1 * (x3 - x2) + u2 * (x1 - x3) + u3 * (x2 - x1)) / determinant;
+    final tx = (u1 * (x2 * y3 - x3 * y2) +
+            u2 * (x3 * y1 - x1 * y3) +
+            u3 * (x1 * y2 - x2 * y1)) /
+        determinant;
+    final b = (v1 * (y2 - y3) + v2 * (y3 - y1) + v3 * (y1 - y2)) / determinant;
+    final d = (v1 * (x3 - x2) + v2 * (x1 - x3) + v3 * (x2 - x1)) / determinant;
+    final ty = (v1 * (x2 * y3 - x3 * y2) +
+            v2 * (x3 * y1 - x1 * y3) +
+            v3 * (x1 * y2 - x2 * y1)) /
+        determinant;
+    return Float64List.fromList([
+      a,
+      b,
+      0,
+      0,
+      c,
+      d,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      tx,
+      ty,
+      0,
+      1,
+    ]);
   }
 
   void _drawAxis(Canvas canvas) {
@@ -1304,19 +1879,36 @@ class _ViewportPainter extends CustomPainter {
 }
 
 class _UvPainter extends CustomPainter {
-  const _UvPainter({required this.face});
+  const _UvPainter({required this.face, required this.texture});
 
   final MeshFace? face;
+  final ui.Image? texture;
 
   @override
   void paint(Canvas canvas, Size size) {
     final scale = math.min(size.width, size.height).toDouble() * 0.72;
     final origin = Offset((size.width - scale) / 2, (size.height - scale) / 2);
     final rect = Rect.fromLTWH(origin.dx, origin.dy, scale, scale);
+    final textureImage = texture;
+    if (textureImage != null) {
+      canvas.drawImageRect(
+        textureImage,
+        Rect.fromLTWH(
+          0,
+          0,
+          textureImage.width.toDouble(),
+          textureImage.height.toDouble(),
+        ),
+        rect,
+        Paint()..filterQuality = FilterQuality.medium,
+      );
+    }
     canvas.drawRect(
       rect,
       Paint()
-        ..color = const Color(0xFF202733)
+        ..color = textureImage == null
+            ? const Color(0xFF202733)
+            : const Color(0x33202733)
         ..style = PaintingStyle.fill,
     );
     final grid = Paint()
@@ -1327,12 +1919,12 @@ class _UvPainter extends CustomPainter {
       canvas.drawLine(
         Offset(origin.dx + offset, origin.dy),
         Offset(origin.dx + offset, origin.dy + scale),
-        grid,
+        grid..color = const Color(0x88343D4B),
       );
       canvas.drawLine(
         Offset(origin.dx, origin.dy + offset),
         Offset(origin.dx + scale, origin.dy + offset),
-        grid,
+        grid..color = const Color(0x88343D4B),
       );
     }
     canvas.drawRect(

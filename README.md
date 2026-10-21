@@ -53,9 +53,10 @@ flutter test
   scene.
 - **Reset active mesh** replaces only the selected mesh with a flat quad.
 - In **Vertex** mode, tap the visible vertices to select them. Choose **Add
-  vertex**, then tap the viewport to place a new vertex on the current view's
-  plane. Front and side views place vertices on vertical planes; Top places
-  them on the horizontal plane.
+  vertex** once, then tap the viewport repeatedly to place vertices on the
+  current view's plane. The tool stays active until you select another tool.
+  Front and side views place vertices on vertical planes; Top places them on
+  the horizontal plane.
 - Select four vertices and choose **Make quad** to connect them into a face.
 - In **Face** mode, tap a face to select it; **Delete face** removes it.
 - Choose **Front**, **Back**, **Left**, **Right**, **Top**, or **Bottom** to
@@ -66,12 +67,25 @@ flutter test
   **Duplicate** or **Shift+D** before moving to make a separate copy.
 - Select an orthographic view and choose **Reference image** to load a
   blueprint for that view. Adjust its opacity or remove it from the scene panel.
-- Open **UVs** to view the selected face's UV tile and drag a corner to adjust
-  its mapping.
+- Use the mouse wheel or the **+ / -** viewport controls to zoom within the
+  supported range; use **Fit** to frame the scene. Models fade as you zoom far
+  out.
+- Open **UVs**, select a face, and drag a UV corner to adjust its mapping.
+  Choose a texture image from the UV toolbar to preview the UVs over it.
+- Switch between **Solid**, **Texture preview**, and **Wireframe** from the
+  viewport toolbar. Texture preview displays an assigned image when available;
+  otherwise the mesh remains gray.
+- Use **File → New**, **Open**, **Save**, and **Export**, or the keyboard
+  shortcuts **Ctrl+N**, **Ctrl+O**, **Ctrl+S**, **Ctrl+Shift+S**, and **Ctrl+E**.
+  Blunder opens and saves `.pky` files (OBJ-compatible geometry with Blunder
+  texture metadata) and exports `.obj` files. Textured exports include an MTL
+  file and a copy of the referenced texture beside the OBJ.
 
 Windows view shortcuts: **Numpad 1** Front, **Numpad 3** Right, **Numpad 7**
 Top, and **Numpad 9** Back. **Numpad 2 / 4 / 6 / 8** orbit in 15-degree steps;
 **Numpad 5** returns to the free view. The number-row 1, 3, 5, 7, and 9 keys
 also select the corresponding views.
 
-The MVP edits an in-memory mesh and does not yet save or export model files.
+The app is implemented in Flutter/Dart, which keeps the desktop and Android
+targets on one shared codebase. Python would add a separate runtime and would
+not simplify the existing Flutter UI or platform packaging.
