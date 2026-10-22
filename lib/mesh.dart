@@ -29,6 +29,15 @@ class MeshModel {
 
   factory MeshModel.empty() => MeshModel._([], []);
 
+  factory MeshModel.fromData(
+    Iterable<Vec3> positions,
+    Iterable<MeshFace> meshFaces,
+  ) =>
+      MeshModel._(
+        positions.map(MeshVertex.new).toList(),
+        meshFaces.toList(),
+      );
+
   factory MeshModel.starterPlane() {
     final mesh = MeshModel.empty();
     mesh.vertices.addAll([
@@ -68,6 +77,229 @@ class MeshModel {
     return selection
         .map((index) => addVertex(vertices[index].position))
         .toList();
+  }
+
+  bool addTriangle(Iterable<int> selectedVertices) {
+    final selection = selectedVertices.toList();
+    if (selection.length != 3 ||
+        selection.toSet().length != 3 ||
+        selection.any((index) => index < 0 || index >= vertices.length)) {
+      return false;
+    }
+    MeshFace? previousFace;
+    for (final face in faces.reversed) {
+      if (face.vertices.length < 3) continue;
+      var sharesEdge = false;
+      for (var index = 0; index < face.vertices.length; index++) {
+        final first = face.vertices[index];
+        final second = face.vertices[(index + 1) % face.vertices.length];
+        if ((first == selection[0] && second == selection[1]) ||
+            (first == selection[1] && second == selection[0])) {
+          sharesEdge = true;
+          break;
+        }
+      }
+      if (sharesEdge) {
+        previousFace = face;
+        break;
+      }
+    }
+    if (previousFace != null) {
+      Vec3 normal(List<int> faceVertices) {
+        final a = vertices[faceVertices[0]].position;
+        final b = vertices[faceVertices[1]].position;
+        final c = vertices[faceVertices[2]].position;
+        return Vec3(
+          (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
+          (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
+          (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x),
+        );
+      }
+
+      final previousNormal = normal(previousFace.vertices);
+      final currentNormal = normal(selection);
+      final alignment = previousNormal.x * currentNormal.x +
+          previousNormal.y * currentNormal.y +
+          previousNormal.z * currentNormal.z;
+      if (alignment < 0) {
+        final first = selection[0];
+        selection[0] = selection[1];
+        selection[1] = first;
+      }
+    }
+    if (faces.any((face) => _sameVertices(face.vertices, selection))) {
+      return false;
+    }
+    final a = vertices[selection[0]].position;
+    final b = vertices[selection[1]].position;
+    final c = vertices[selection[2]].position;
+    final ab = Vec3(b.x - a.x, b.y - a.y, b.z - a.z);
+    final ac = Vec3(c.x - a.x, c.y - a.y, c.z - a.z);
+    final cross = Vec3(
+      ab.y * ac.z - ab.z * ac.y,
+      ab.z * ac.x - ab.x * ac.z,
+      ab.x * ac.y - ab.y * ac.x,
+    );
+    if (cross.x * cross.x + cross.y * cross.y + cross.z * cross.z < 1e-12) {
+      return false;
+    }
+    faces.add(
+      MeshFace(
+        selection,
+        const [Offset(0.08, 0.08), Offset(0.92, 0.08), Offset(0.5, 0.92)],
+      ),
+    );
+    return true;
+  }
+
+  int? mergeTriangles(Iterable<int> selectedFaces) {
+    final indices = selectedFaces.toSet().toList()..sort();
+    if (indices.length != 2 ||
+        indices.any((index) => index < 0 || index >= faces.length)) {
+      return null;
+    }
+    final first = faces[indices[0]];
+    final second = faces[indices[1]];
+    if (first.vertices.length != 3 || second.vertices.length != 3) return null;
+    final allVertices = {...first.vertices, ...second.vertices};
+    if (allVertices.length != 4) return null;
+
+    final edges = <(int, int)>[];
+    for (final face in [first, second]) {
+      for (var corner = 0; corner < face.vertices.length; corner++) {
+        final edge = (
+          face.vertices[corner],
+          face.vertices[(corner + 1) % face.vertices.length],
+        );
+        final sharedIndex = edges.indexWhere(
+          (candidate) =>
+              (candidate.$1 == edge.$1 && candidate.$2 == edge.$2) ||
+              (candidate.$1 == edge.$2 && candidate.$2 == edge.$1),
+        );
+        if (sharedIndex >= 0) {
+          edges.removeAt(sharedIndex);
+        } else {
+          edges.add(edge);
+        }
+      }
+    }
+    if (edges.length != 4) return null;
+
+    final neighbors = <int, Set<int>>{};
+    for (final edge in edges) {
+      neighbors.putIfAbsent(edge.$1, () => {}).add(edge.$2);
+      neighbors.putIfAbsent(edge.$2, () => {}).add(edge.$1);
+    }
+    if (neighbors.length != 4 ||
+        neighbors.values.any((set) => set.length != 2)) {
+      return null;
+    }
+    final orderedVertices = <int>[edges.first.$1];
+    var previous = -1;
+    var current = edges.first.$1;
+    while (orderedVertices.length < 4) {
+      final next =
+          neighbors[current]!.firstWhere((vertex) => vertex != previous);
+      if (orderedVertices.contains(next)) return null;
+      orderedVertices.add(next);
+      previous = current;
+      current = next;
+    }
+    if (!neighbors[current]!.contains(orderedVertices.first)) return null;
+
+    final uvByVertex = <int, List<Offset>>{};
+    for (final face in [first, second]) {
+      for (var corner = 0; corner < face.vertices.length; corner++) {
+        uvByVertex
+            .putIfAbsent(face.vertices[corner], () => [])
+            .add(face.uv[corner]);
+      }
+    }
+    final mergedUv = orderedVertices.map((vertex) {
+      final values = uvByVertex[vertex]!;
+      return Offset(
+        values.map((value) => value.dx).reduce((a, b) => a + b) / values.length,
+        values.map((value) => value.dy).reduce((a, b) => a + b) / values.length,
+      );
+    }).toList();
+
+    for (final index in indices.reversed) {
+      faces.removeAt(index);
+    }
+    faces.add(MeshFace(orderedVertices, mergedUv));
+    return faces.length - 1;
+  }
+
+  bool rotateVertices(
+    Iterable<int> selectedVertices,
+    int axis,
+    double degrees,
+  ) {
+    final selection = selectedVertices.toSet().toList();
+    if (selection.isEmpty ||
+        selection.any((index) => index < 0 || index >= vertices.length) ||
+        axis < 0 ||
+        axis > 2) {
+      return false;
+    }
+    final center = Vec3(
+      selection
+              .map((index) => vertices[index].position.x)
+              .reduce((a, b) => a + b) /
+          selection.length,
+      selection
+              .map((index) => vertices[index].position.y)
+              .reduce((a, b) => a + b) /
+          selection.length,
+      selection
+              .map((index) => vertices[index].position.z)
+              .reduce((a, b) => a + b) /
+          selection.length,
+    );
+    final radians = degrees * math.pi / 180;
+    final cosine = math.cos(radians);
+    final sine = math.sin(radians);
+    for (final index in selection) {
+      final point = vertices[index].position;
+      final x = point.x - center.x;
+      final y = point.y - center.y;
+      final z = point.z - center.z;
+      final rotated = switch (axis) {
+        0 => Vec3(x, y * cosine - z * sine, y * sine + z * cosine),
+        1 => Vec3(x * cosine + z * sine, y, -x * sine + z * cosine),
+        _ => Vec3(x * cosine - y * sine, x * sine + y * cosine, z),
+      };
+      vertices[index] = MeshVertex(
+        Vec3(
+          rotated.x + center.x,
+          rotated.y + center.y,
+          rotated.z + center.z,
+        ),
+      );
+    }
+    return true;
+  }
+
+  bool mirror(int axis) {
+    if (axis < 0 || axis > 2 || vertices.isEmpty) return false;
+    for (var index = 0; index < vertices.length; index++) {
+      final point = vertices[index].position;
+      vertices[index] = MeshVertex(
+        switch (axis) {
+          0 => Vec3(-point.x, point.y, point.z),
+          1 => Vec3(point.x, -point.y, point.z),
+          _ => Vec3(point.x, point.y, -point.z),
+        },
+      );
+    }
+    for (var index = 0; index < faces.length; index++) {
+      final face = faces[index];
+      faces[index] = MeshFace(
+        face.vertices.reversed.toList(),
+        face.uv.reversed.toList(),
+      );
+    }
+    return true;
   }
 
   int? duplicateFace(int faceIndex) {
@@ -214,7 +446,7 @@ class MeshModel {
     if (faceIndex < 0 ||
         faceIndex >= faces.length ||
         cornerIndex < 0 ||
-        cornerIndex >= 4) {
+        cornerIndex >= faces[faceIndex].uv.length) {
       return false;
     }
     faces[faceIndex].uv[cornerIndex] = Offset(

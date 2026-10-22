@@ -1,0 +1,100 @@
+import 'dart:io';
+
+import 'package:blunder/mesh.dart';
+import 'package:blunder/model_io.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  group('ModelIo', () {
+    test('round-trips multiple meshes, quad UVs, and texture metadata', () {
+      final first = MeshModel.starterPlane();
+      first.updateUv(0, 2, const Offset(0.7, 0.6));
+      final second = MeshModel.starterPlane()
+        ..moveVertices(
+          [0, 1, 2, 3],
+          const Vec3(3, 0, 2),
+        );
+      final encoded = ModelIo.encodePky([
+        ModelMeshData(
+          name: 'Main Mesh',
+          mesh: first,
+          texturePath: r'D:\Textures\stone.png',
+        ),
+        ModelMeshData(name: 'SideMesh', mesh: second),
+      ]);
+
+      final decoded = ModelIo.decodePky(encoded);
+
+      expect(decoded, hasLength(2));
+      expect(decoded[0].name, 'Main Mesh');
+      expect(decoded[0].texturePath, r'D:\Textures\stone.png');
+      expect(decoded[0].mesh.vertices, hasLength(4));
+      expect(decoded[0].mesh.faces.single.vertices, [0, 1, 2, 3]);
+      expect(decoded[0].mesh.faces.single.uv[2], const Offset(0.7, 0.6));
+      expect(decoded[1].mesh.vertices[0].position.x, 2);
+      expect(decoded[1].mesh.vertices[0].position.z, 2);
+    });
+
+    test('rejects non-quad or invalid face indices with a line number', () {
+      expect(
+        () => ModelIo.decodePky(
+          'o Mesh_1\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n'
+          'v 2 1 0\nf 1 2 3 4 5\n',
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            contains('Line 7'),
+          ),
+        ),
+      );
+      expect(
+        () => ModelIo.decodePky(
+          'o Mesh_1\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 9\n',
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('round-trips triangular face geometry and UVs', () {
+      final mesh = MeshModel.empty()
+        ..addVertex(const Vec3(0, 0, 0))
+        ..addVertex(const Vec3(1, 0, 0))
+        ..addVertex(const Vec3(0, 1, 0))
+        ..addTriangle([0, 1, 2]);
+      final decoded = ModelIo.decodePky(ModelIo.encodePky([
+        ModelMeshData(name: 'Triangle', mesh: mesh),
+      ]));
+
+      expect(decoded.single.mesh.faces.single.vertices, [0, 1, 2]);
+      expect(decoded.single.mesh.faces.single.uv, hasLength(3));
+    });
+
+    test('writes a PKY project that can be reopened from disk', () async {
+      final directory = await Directory.systemTemp.createTemp('blunder_pky_');
+      addTearDown(() => directory.delete(recursive: true));
+      final path = '${directory.path}\\test_scene.pky';
+
+      await ModelIo.writePky(
+        path,
+        [ModelMeshData(name: 'Mesh_1', mesh: MeshModel.starterPlane())],
+      );
+      final loaded = await ModelIo.readPky(path);
+
+      expect(loaded, hasLength(1));
+      expect(loaded.single.mesh.faces, hasLength(1));
+      expect(loaded.single.mesh.vertices, hasLength(4));
+    });
+
+    test('exports OBJ-compatible geometry and UV face indices', () {
+      final obj = ModelIo.encodeObj([
+        ModelMeshData(name: 'Mesh 1', mesh: MeshModel.starterPlane()),
+      ]);
+
+      expect(obj, contains('o Mesh_1'));
+      expect(obj, contains('vt 0.0800000000 0.0800000000'));
+      expect(obj, contains('f 1/1 2/2 3/3 4/4'));
+    });
+  });
+}
