@@ -37,12 +37,15 @@ void main() {
 
     test('rejects non-quad or invalid face indices with a line number', () {
       expect(
-        () => ModelIo.decodePky('o Mesh_1\nv 0 0 0\nf 1 2 3\n'),
+        () => ModelIo.decodePky(
+          'o Mesh_1\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n'
+          'v 2 1 0\nf 1 2 3 4 5\n',
+        ),
         throwsA(
           isA<FormatException>().having(
             (error) => error.message,
             'message',
-            contains('Line 3'),
+            contains('Line 7'),
           ),
         ),
       );
@@ -52,6 +55,20 @@ void main() {
         ),
         throwsA(isA<FormatException>()),
       );
+    });
+
+    test('round-trips triangular face geometry and UVs', () {
+      final mesh = MeshModel.empty()
+        ..addVertex(const Vec3(0, 0, 0))
+        ..addVertex(const Vec3(1, 0, 0))
+        ..addVertex(const Vec3(0, 1, 0))
+        ..addTriangle([0, 1, 2]);
+      final decoded = ModelIo.decodePky(ModelIo.encodePky([
+        ModelMeshData(name: 'Triangle', mesh: mesh),
+      ]));
+
+      expect(decoded.single.mesh.faces.single.vertices, [0, 1, 2]);
+      expect(decoded.single.mesh.faces.single.uv, hasLength(3));
     });
 
     test('writes a PKY project that can be reopened from disk', () async {

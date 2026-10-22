@@ -134,9 +134,9 @@ class ModelIo {
             );
           case 'f':
             final target = objectFor('Mesh_${builders.length + 1}');
-            if (values.length != 4) {
+            if (values.length != 3 && values.length != 4) {
               throw FormatException(
-                'Only quad faces are supported, but this face has '
+                'Only triangle and quad faces are supported, but this face has '
                 '${values.length} corners.',
               );
             }
@@ -166,14 +166,20 @@ class ModelIo {
             target.faces.add(
               MeshFace(
                 faceVertices,
-                faceUvs.length == 4
+                faceUvs.length == values.length
                     ? faceUvs
-                    : const [
-                        Offset(0.08, 0.08),
-                        Offset(0.92, 0.08),
-                        Offset(0.92, 0.92),
-                        Offset(0.08, 0.92),
-                      ],
+                    : values.length == 3
+                        ? const [
+                            Offset(0.08, 0.08),
+                            Offset(0.92, 0.08),
+                            Offset(0.5, 0.92),
+                          ]
+                        : const [
+                            Offset(0.08, 0.08),
+                            Offset(0.92, 0.08),
+                            Offset(0.92, 0.92),
+                            Offset(0.08, 0.92),
+                          ],
               ),
             );
           case 'mtllib':

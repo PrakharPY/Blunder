@@ -25,6 +25,43 @@ void main() {
       expect(mesh.addQuad([0, 1, 2, 3]), isFalse);
     });
 
+    test('creates a triangle strip and merges adjacent triangles into a quad',
+        () {
+      final mesh = MeshModel.empty()
+        ..addVertex(const Vec3(0, 0, 0))
+        ..addVertex(const Vec3(1, 0, 0))
+        ..addVertex(const Vec3(1, 1, 0))
+        ..addVertex(const Vec3(0, 1, 0));
+
+      expect(mesh.addTriangle([0, 1, 2]), isTrue);
+      expect(mesh.addTriangle([0, 2, 3]), isTrue);
+      expect(mesh.faces, hasLength(2));
+      expect(mesh.faces.every((face) => face.vertices.length == 3), isTrue);
+
+      final merged = mesh.mergeTriangles([0, 1]);
+
+      expect(merged, 0);
+      expect(mesh.faces, hasLength(1));
+      expect(mesh.faces.single.vertices, hasLength(4));
+      expect(mesh.faces.single.vertices.toSet(), {0, 1, 2, 3});
+      expect(mesh.faces.single.uv, hasLength(4));
+    });
+
+    test('rotates a selection around its center and mirrors mesh winding', () {
+      final mesh = MeshModel.starterPlane();
+
+      expect(mesh.rotateVertices([0, 1], 2, 90), isTrue);
+      expect(mesh.vertices[0].position.x, closeTo(0, 1e-9));
+      expect(mesh.vertices[0].position.y, closeTo(-2, 1e-9));
+      expect(mesh.vertices[1].position.x, closeTo(0, 1e-9));
+      expect(mesh.vertices[1].position.y, closeTo(0, 1e-9));
+
+      final originalFace = mesh.faces.single.vertices.toList();
+      expect(mesh.mirror(0), isTrue);
+      expect(mesh.vertices[0].position.x, closeTo(0, 1e-9));
+      expect(mesh.faces.single.vertices, originalFace.reversed);
+    });
+
     test('connects vertices into quads on vertical planes', () {
       for (final positions in [
         const [
