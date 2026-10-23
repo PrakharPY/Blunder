@@ -456,6 +456,72 @@ class MeshModel {
     return true;
   }
 
+  bool smartUvRemap() {
+    if (faces.isEmpty) return false;
+
+    final columns = math.sqrt(faces.length).ceil();
+    final rows = (faces.length / columns).ceil();
+    final cellWidth = 1 / columns;
+    final cellHeight = 1 / rows;
+    final margin = math.min(cellWidth, cellHeight) * 0.08;
+
+    for (var faceIndex = 0; faceIndex < faces.length; faceIndex++) {
+      final face = faces[faceIndex];
+      final positions =
+          face.vertices.map((index) => vertices[index].position).toList();
+      var normalX = 0.0;
+      var normalY = 0.0;
+      var normalZ = 0.0;
+      for (var index = 0; index < positions.length; index++) {
+        final current = positions[index];
+        final next = positions[(index + 1) % positions.length];
+        normalX += (current.y - next.y) * (current.z + next.z);
+        normalY += (current.z - next.z) * (current.x + next.x);
+        normalZ += (current.x - next.x) * (current.y + next.y);
+      }
+      final components = [normalX.abs(), normalY.abs(), normalZ.abs()];
+      var droppedAxis = 0;
+      if (components[1] > components[droppedAxis]) droppedAxis = 1;
+      if (components[2] > components[droppedAxis]) droppedAxis = 2;
+      final projected = positions.map((point) {
+        return switch (droppedAxis) {
+          0 => Offset(point.y, point.z),
+          1 => Offset(point.z, point.x),
+          _ => Offset(point.x, point.y),
+        };
+      }).toList();
+      final minX = projected.map((point) => point.dx).reduce(math.min);
+      final maxX = projected.map((point) => point.dx).reduce(math.max);
+      final minY = projected.map((point) => point.dy).reduce(math.min);
+      final maxY = projected.map((point) => point.dy).reduce(math.max);
+      final spanX = maxX - minX;
+      final spanY = maxY - minY;
+      final availableWidth = cellWidth - margin * 2;
+      final availableHeight = cellHeight - margin * 2;
+      final scale = math.min(
+        availableWidth / math.max(spanX, 1e-8),
+        availableHeight / math.max(spanY, 1e-8),
+      );
+      final offsetX = (faceIndex % columns) * cellWidth;
+      final offsetY = 1 - ((faceIndex ~/ columns) + 1) * cellHeight;
+      final usedWidth = spanX * scale;
+      final usedHeight = spanY * scale;
+      final centeredX = offsetX + (cellWidth - usedWidth) / 2;
+      final centeredY = offsetY + (cellHeight - usedHeight) / 2;
+      face.uv
+        ..clear()
+        ..addAll(
+          projected.map(
+            (point) => Offset(
+              centeredX + (point.dx - minX) * scale,
+              centeredY + (point.dy - minY) * scale,
+            ),
+          ),
+        );
+    }
+    return true;
+  }
+
   double _projectedSignedArea(List<int> indices, int droppedAxis) {
     var area = 0.0;
     for (var i = 0; i < indices.length; i++) {

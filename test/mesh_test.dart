@@ -132,5 +132,23 @@ void main() {
       expect(mesh.faces.single.uv[1], const Offset(1, 0));
       expect(mesh.updateUv(3, 0, Offset.zero), isFalse);
     });
+
+    test('smart UV remap separates face islands and fits them in the tile', () {
+      final mesh = MeshModel.starterPlane();
+      mesh.duplicateFace(0);
+      mesh.moveVertices([4, 5, 6, 7], const Vec3(3, 0, 0));
+
+      expect(mesh.smartUvRemap(), isTrue);
+      final firstUvs = mesh.faces[0].uv;
+      final secondUvs = mesh.faces[1].uv;
+      expect(firstUvs.every((uv) => uv.dx >= 0 && uv.dx < 0.5), isTrue);
+      expect(secondUvs.every((uv) => uv.dx > 0.5 && uv.dx <= 1), isTrue);
+      expect(
+        mesh.faces.expand((face) => face.uv).every(
+            (uv) => uv.dx >= 0 && uv.dx <= 1 && uv.dy >= 0 && uv.dy <= 1),
+        isTrue,
+      );
+      expect(MeshModel.empty().smartUvRemap(), isFalse);
+    });
   });
 }

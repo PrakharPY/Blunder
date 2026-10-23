@@ -20,8 +20,82 @@ void main() {
     await tester.tap(find.text('UVs'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Choose a texture, then drag UV corners over it'),
-        findsOneWidget);
+    expect(
+      find.text(
+        'Face 1 · 0 UVs · S: select/move · E: stretch · M: mirror · '
+        'choose a texture',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Smart UV remap'), findsOneWidget);
+    expect(find.text('Add texture'), findsOneWidget);
+  });
+
+  testWidgets('selects, moves, stretches, and mirrors UV points by shortcut',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.text('UV layout'));
+    await tester.pumpAndSettle();
+
+    final canvasRect =
+        tester.getRect(find.byKey(const ValueKey('uvEditorCanvas')));
+    final uvScale = canvasRect.shortestSide * 0.72;
+    final uvOrigin = canvasRect.center - Offset(uvScale / 2, uvScale / 2);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('UV box select · drag a box around UV corners'),
+      findsOneWidget,
+    );
+    await tester.dragFrom(
+      uvOrigin + const Offset(2, 2),
+      Offset(uvScale - 4, uvScale - 4),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'Face 1 · 4 UVs · S: select/move · E: stretch · M: mirror · '
+        'choose a texture',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('UV move · drag selected UVs · Enter confirms · Esc cancels'),
+      findsOneWidget,
+    );
+    await tester.dragFrom(canvasRect.center, const Offset(20, -12));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyE);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('UV stretch X · drag to scale · Enter confirms · Esc cancels'),
+      findsOneWidget,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('UV stretch'), findsNothing);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyM);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyY);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('UV mirrored on Y · Enter confirms · Esc cancels'),
+      findsOneWidget,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
   });
 
   testWidgets('keyboard switches views and locks move to an axis',
@@ -98,6 +172,45 @@ void main() {
     expect(tester.widget<ListTile>(secondMeshTile).selected, isFalse);
   });
 
+  testWidgets('mesh long-press menu renames and copies a mesh', (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.longPress(find.text('Mesh_1'));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename mesh'), findsOneWidget);
+    await tester.tap(find.text('Rename mesh'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Ground');
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ground'), findsOneWidget);
+
+    await tester.longPress(find.text('Ground'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Create copy'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ground_copy'), findsOneWidget);
+
+    await tester.tap(find.text('Ground_copy'));
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('Ground'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete mesh'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ground'), findsNothing);
+    final remainingTile = find.ancestor(
+      of: find.text('Ground_copy'),
+      matching: find.byType(ListTile),
+    );
+    expect(tester.widget<ListTile>(remainingTile).selected, isTrue);
+  });
+
   testWidgets('keeps Add vertex active for repeated viewport clicks',
       (tester) async {
     tester.view.physicalSize = const Size(1100, 800);
@@ -141,7 +254,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('File menu'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('New scene'));
+    await tester.tap(find.text('New Scene'));
     await tester.pumpAndSettle();
     expect(find.text('Unsaved changes'), findsOneWidget);
     await tester.tap(find.text('Discard'));
@@ -225,11 +338,18 @@ void main() {
     final fileMenu = find.byTooltip('File menu');
     await tester.tap(fileMenu);
     await tester.pumpAndSettle();
-    expect(find.text('New scene'), findsOneWidget);
+    expect(find.text('New Scene'), findsOneWidget);
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.text('Save'), findsOneWidget);
+    expect(find.text('Save As'), findsOneWidget);
+    expect(find.text('Export'), findsOneWidget);
+    expect(find.text('Exit'), findsOneWidget);
+    expect(find.text('Import .obj…'), findsOneWidget);
+    expect(find.text('Import .obj…'), findsOneWidget);
 
     await tester.tap(fileMenu);
     await tester.pumpAndSettle();
-    expect(find.text('New scene'), findsNothing);
+    expect(find.text('New Scene'), findsNothing);
     expect(fileMenu, findsOneWidget);
   });
 

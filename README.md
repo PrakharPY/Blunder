@@ -51,6 +51,9 @@ flutter test
 - Use the **Meshes** panel to add and switch between independent meshes. Each
   mesh starts with its own flat quad; adding a mesh leaves the others in the
   scene.
+- Right-click a mesh in the panel (or long-press it on touch devices) to rename
+  it, create an independent copy, or delete it. Imported OBJ parts appear
+  beneath a collapsible group named after the OBJ file.
 - **Reset active mesh** replaces only the selected mesh with a flat quad.
 - In **Vertex** mode, tap the visible vertices to select them. Choose **Add
   vertex** once, then tap the viewport repeatedly to place vertices on the
@@ -63,15 +66,19 @@ flutter test
 - In **Face** mode, click two adjacent triangles and choose **Triangles → quad**
   to merge them into one quad while preserving their UV positions.
 - In **Face** mode, tap a face to select it; **Delete face** removes it.
+- Click or tap additional vertices/faces to multi-select them. Selected elements
+  are highlighted light red; move and rotate operations affect the full
+  selection.
 - Choose **Front**, **Back**, **Left**, **Right**, **Top**, or **Bottom** to
   align the viewport; **Free** restores the orbiting view. Drag to orbit and
   pinch to zoom or use two fingers to pan.
 - Select vertices or a face, press **M**, choose **X**, **Y**, or **Z**, then
   drag in the viewport to move the selection along that world axis. Use
   **Duplicate** or **Shift+D** before moving to make a separate copy.
-- Choose a view from the **View** menu or each viewport's eye menu. Select an
-  orthographic view and choose **Add → Reference image** to load a blueprint
-  for that view. Adjust its opacity or remove it from the scene panel.
+- Choose a view from the **View** menu or each viewport's eye menu. Activate a
+  viewport and choose **Add → Reference image** to load a blueprint for that
+  quadrant. Each quadrant keeps its own reference image; adjust its opacity or
+  remove it from the scene panel.
 - Use the mouse wheel or the **+ / -** viewport controls to zoom within the
   supported range; use **Fit** to frame the scene. Models fade as you zoom far
   out.
@@ -86,16 +93,28 @@ flutter test
   Select vertices or faces and press **R**, then **X/Y/Z**, type an angle, and
   press **Enter** to rotate around that axis. If nothing is selected, rotation
   applies to the active mesh.
-- Open **UVs**, select a face, and drag a UV corner to adjust its mapping.
-  Choose a texture image from the UV toolbar to preview the UVs over it.
+- Open **UVs** and choose **Smart UV remap** to project each face and pack its
+  UV island into a separate tile in the 0–1 texture space. Select a face in
+  Model view to drag its UV corners manually. Use **Add texture** in the UV
+  toolbar to assign a texture to the active mesh; it remains linked to that
+  mesh and is used in Textured view. In the UV editor, press **S** and drag a
+  box to select UV corners across the active mesh; press **S** again, drag,
+  then **Enter** to move the selection. Press **E**, then **X** or **Y**, and
+  drag to stretch along that UV axis; **M**, then **X** or **Y**, mirrors the
+  selection. **Enter** confirms UV transforms and **Esc** cancels a transform.
 - Switch between **Solid**, **Textured**, and **Wireframe** from the **Scene**
   menu. Texture preview displays an assigned image when available; otherwise
   the mesh remains gray.
 - Use **File → New**, **Open**, **Save**, and **Export**, or the keyboard
   shortcuts **Ctrl+N**, **Ctrl+O**, **Ctrl+S**, **Ctrl+Shift+S**, and **Ctrl+E**.
-  Blunder opens and saves `.pky` files (OBJ-compatible geometry with Blunder
-  texture metadata) and exports `.obj` files. Textured exports include an MTL
-  file and a copy of the referenced texture beside the OBJ.
+  Blunder opens `.pky` and `.pkg` scene files and saves `.pky` files
+  (OBJ-compatible geometry with Blunder texture metadata), imports `.obj`
+  files, and exports Wavefront `.obj` files. OBJ import
+  reads material assignments and diffuse `map_Kd` textures from the companion
+  MTL file. Each object/material part becomes a selectable mesh under the
+  imported file's group; polygon faces larger than quads are triangulated.
+  Textured exports include an MTL file and a copy of the referenced texture
+  beside the OBJ.
 - On Windows, the app registers `.pky` files to use the Blunder executable icon
   and open in Blunder when launched from File Explorer.
 
@@ -104,6 +123,7 @@ Top, and **Numpad 9** Back. **Numpad 2 / 4 / 6 / 8** orbit in 15-degree steps;
 **Numpad 5** returns to the free view. The number-row 1, 3, 5, 7, and 9 keys
 also select the corresponding views. Press **R**, then **X/Y/Z**, enter a
 rotation angle, and press **Enter** to rotate the selection or active mesh.
+Free view can orbit over and underneath the model.
 
 The app is implemented in Flutter/Dart, which keeps the desktop and Android
 targets on one shared codebase. Python would add a separate runtime and would
