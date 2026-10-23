@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.02.1** — Windows-first polygon modeling MVP.
+**Version 1.03** — Windows-first polygon modeling MVP.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
