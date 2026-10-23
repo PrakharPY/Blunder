@@ -71,6 +71,72 @@ enum _UvEditTool {
   mirrorPending,
 }
 
+class _SceneObjectSnapshot {
+  const _SceneObjectSnapshot({
+    required this.name,
+    required this.mesh,
+    required this.texturePath,
+    required this.textureImage,
+    required this.groupName,
+  });
+
+  final String name;
+  final MeshModel mesh;
+  final String? texturePath;
+  final ui.Image? textureImage;
+  final String? groupName;
+}
+
+class _ViewportSnapshot {
+  const _ViewportSnapshot({
+    required this.preset,
+    required this.yaw,
+    required this.pitch,
+    required this.zoom,
+    required this.pan,
+  });
+
+  final ViewPreset preset;
+  final double yaw;
+  final double pitch;
+  final double zoom;
+  final Offset pan;
+}
+
+class _EditorSnapshot {
+  const _EditorSnapshot({
+    required this.objects,
+    required this.viewports,
+    required this.visibleViewportCount,
+    required this.activeViewportIndex,
+    required this.activeObjectIndex,
+    required this.mode,
+    required this.page,
+    required this.tool,
+    required this.selectedVertices,
+    required this.selectedFaces,
+    required this.selectedFace,
+    required this.referenceImages,
+    required this.viewStyle,
+    required this.isDirty,
+  });
+
+  final List<_SceneObjectSnapshot> objects;
+  final List<_ViewportSnapshot> viewports;
+  final int visibleViewportCount;
+  final int activeViewportIndex;
+  final int activeObjectIndex;
+  final EditMode mode;
+  final EditorPage page;
+  final ActiveTool tool;
+  final Set<int> selectedVertices;
+  final Set<int> selectedFaces;
+  final int? selectedFace;
+  final Map<int, ui.Image> referenceImages;
+  final ViewStyle viewStyle;
+  final bool isDirty;
+}
+
 class ViewportState {
   ViewportState(this.preset);
 
@@ -170,6 +236,17 @@ class _ModelerScreenState extends State<ModelerScreen> {
   bool _awaitingRotationAxis = false;
   MeshAxis? _rotationAxis;
   String _rotationDegrees = '';
+  final List<_EditorSnapshot> _undoHistory = [];
+  final List<_EditorSnapshot> _redoHistory = [];
+  bool _boxSelectActive = false;
+  Offset? _boxSelectionStart;
+  Offset? _boxSelectionEnd;
+  bool _scaleActive = false;
+  String _scaleFactorText = '';
+  List<Vec3> _scaleStartPositions = [];
+  Offset? _scaleStartPointer;
+  bool _scaleStartDirty = false;
+  static const int _historyLimit = 100;
 
   @override
   void initState() {
@@ -183,17 +260,24 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   @override
   void dispose() {
-    for (final image in _referenceImages.values) {
+    final images = <ui.Image>{
+      ..._referenceImages.values,
+      for (final object in _objects)
+        if (object.textureImage != null) object.textureImage!,
+      for (final snapshot in [..._undoHistory, ..._redoHistory]) ...[
+        ...snapshot.referenceImages.values,
+        for (final object in snapshot.objects)
+          if (object.textureImage != null) object.textureImage!,
+      ],
+    };
+    for (final image in images) {
       image.dispose();
-    }
-    for (final object in _objects) {
-      object.textureImage?.dispose();
     }
     super.dispose();
   }
 
   void _resetPlane() {
-    _objects[_activeObjectIndex].textureImage?.dispose();
+    _recordUndo();
     setState(() {
       _objects[_activeObjectIndex] = SceneObject(
         _objects[_activeObjectIndex].name,
@@ -210,6 +294,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _addMesh() {
+    _recordUndo();
     setState(() {
       final mesh = MeshModel.starterPlane();
       mesh.moveVertices(
@@ -250,6 +335,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _setViewportCount(int count) {
+    if (count != _visibleViewportCount) _recordUndo();
     setState(() {
       _visibleViewportCount = count.clamp(1, 4);
       _activeViewportIndex = 0;
@@ -262,6 +348,142 @@ class _ModelerScreenState extends State<ModelerScreen> {
           _viewports[2].preset = ViewPreset.free;
           _viewports[3].preset = ViewPreset.top;
         }
+      }
+    });
+  }
+
+  MeshModel _copyMesh(MeshModel mesh) => MeshModel.fromData(
+        mesh.vertices.map((vertex) => vertex.position),
+        mesh.faces.map((face) => MeshFace(face.vertices, face.uv)),
+      );
+
+  _EditorSnapshot _captureSnapshot() => _EditorSnapshot(
+        objects: [
+          for (final object in _objects)
+            _SceneObjectSnapshot(
+              name: object.name,
+              mesh: _copyMesh(object.mesh),
+              texturePath: object.texturePath,
+              textureImage: object.textureImage,
+              groupName: object.groupName,
+            ),
+        ],
+        viewports: [
+          for (final viewport in _viewports)
+            _ViewportSnapshot(
+              preset: viewport.preset,
+              yaw: viewport.yaw,
+              pitch: viewport.pitch,
+              zoom: viewport.zoom,
+              pan: viewport.pan,
+            ),
+        ],
+        visibleViewportCount: _visibleViewportCount,
+        activeViewportIndex: _activeViewportIndex,
+        activeObjectIndex: _activeObjectIndex,
+        mode: _mode,
+        page: _page,
+        tool: _tool,
+        selectedVertices: Set.of(_selectedVertices),
+        selectedFaces: Set.of(_selectedFaces),
+        selectedFace: _selectedFace,
+        referenceImages: Map.of(_referenceImages),
+        viewStyle: _viewStyle,
+        isDirty: _isDirty,
+      );
+
+  void _recordUndo() {
+    _undoHistory.add(_captureSnapshot());
+    if (_undoHistory.length > _historyLimit) _undoHistory.removeAt(0);
+    _redoHistory.clear();
+  }
+
+  void _restoreSnapshot(_EditorSnapshot snapshot) {
+    setState(() {
+      _objects
+        ..clear()
+        ..addAll([
+          for (final object in snapshot.objects)
+            SceneObject(
+              object.name,
+              _copyMesh(object.mesh),
+              texturePath: object.texturePath,
+              textureImage: object.textureImage,
+              groupName: object.groupName,
+            ),
+        ]);
+      for (var index = 0; index < _viewports.length; index++) {
+        final state = snapshot.viewports[index];
+        final viewport = _viewports[index];
+        viewport
+          ..preset = state.preset
+          ..yaw = state.yaw
+          ..pitch = state.pitch
+          ..zoom = state.zoom
+          ..pan = state.pan;
+      }
+      _visibleViewportCount = snapshot.visibleViewportCount;
+      _activeViewportIndex = snapshot.activeViewportIndex;
+      _activeObjectIndex = snapshot.activeObjectIndex;
+      _mode = snapshot.mode;
+      _page = snapshot.page;
+      _tool = snapshot.tool;
+      _selectedVertices
+        ..clear()
+        ..addAll(snapshot.selectedVertices);
+      _selectedFaces
+        ..clear()
+        ..addAll(snapshot.selectedFaces);
+      _selectedFace = snapshot.selectedFace;
+      _referenceImages
+        ..clear()
+        ..addAll(snapshot.referenceImages);
+      _viewStyle = snapshot.viewStyle;
+      _isDirty = snapshot.isDirty;
+      _lockedAxis = null;
+      _boxSelectActive = false;
+      _scaleActive = false;
+    });
+  }
+
+  void _undo() {
+    if (_undoHistory.isEmpty) return;
+    _redoHistory.add(_captureSnapshot());
+    _restoreSnapshot(_undoHistory.removeLast());
+  }
+
+  void _redo() {
+    if (_redoHistory.isEmpty) return;
+    _undoHistory.add(_captureSnapshot());
+    _restoreSnapshot(_redoHistory.removeLast());
+  }
+
+  void _closeViewport(int index) {
+    if (_visibleViewportCount <= 1 ||
+        index < 0 ||
+        index >= _visibleViewportCount) {
+      return;
+    }
+    _recordUndo();
+    setState(() {
+      _referenceImages.remove(index);
+      for (var source = index + 1; source < _visibleViewportCount; source++) {
+        final previous = _viewports[source - 1];
+        final next = _viewports[source];
+        previous
+          ..preset = next.preset
+          ..yaw = next.yaw
+          ..pitch = next.pitch
+          ..zoom = next.zoom
+          ..pan = next.pan;
+        final image = _referenceImages.remove(source);
+        if (image != null) _referenceImages[source - 1] = image;
+      }
+      _visibleViewportCount--;
+      if (_activeViewportIndex == index) {
+        _activeViewportIndex = math.min(index, _visibleViewportCount - 1);
+      } else if (_activeViewportIndex > index) {
+        _activeViewportIndex--;
       }
     });
   }
@@ -348,8 +570,12 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   void _duplicateSelection() {
     if (_mode == EditMode.vertex && _selectedVertices.isNotEmpty) {
+      _recordUndo();
       final duplicated = _mesh.duplicateVertices(_selectedVertices);
-      if (duplicated.isEmpty) return;
+      if (duplicated.isEmpty) {
+        _undoHistory.removeLast();
+        return;
+      }
       setState(() {
         _selectedVertices
           ..clear()
@@ -364,9 +590,13 @@ class _ModelerScreenState extends State<ModelerScreen> {
         ? (_selectedFaces.toList()..sort())
         : (_selectedFace == null ? <int>[] : [_selectedFace!]);
     if (_mode == EditMode.face && facesToDuplicate.isNotEmpty) {
+      _recordUndo();
       final duplicatedFaces =
           facesToDuplicate.map(_mesh.duplicateFace).whereType<int>().toList();
-      if (duplicatedFaces.isEmpty) return;
+      if (duplicatedFaces.isEmpty) {
+        _undoHistory.removeLast();
+        return;
+      }
       setState(() {
         _selectedFace = duplicatedFaces.last;
         _selectedFaces
@@ -440,6 +670,25 @@ class _ModelerScreenState extends State<ModelerScreen> {
   void _duplicateIfRequested() => _duplicateSelection();
 
   KeyEventResult _handleUvKeyEvent(LogicalKeyboardKey key) {
+    if (key == LogicalKeyboardKey.delete ||
+        key == LogicalKeyboardKey.backspace) {
+      _deleteSelection();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyA) {
+      _toggleSelectAll();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyB) {
+      setState(() {
+        _selectedUvs.clear();
+        _uvEditTool = _UvEditTool.boxSelect;
+        _uvSelectionReadyToMove = false;
+        _uvSelectionStart = null;
+        _uvSelectionEnd = null;
+      });
+      return KeyEventResult.handled;
+    }
     if (key == LogicalKeyboardKey.escape) {
       if (_uvEditTool != _UvEditTool.idle || _uvSelectionStart != null) {
         _cancelUvEdit();
@@ -463,7 +712,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
         return KeyEventResult.handled;
       }
     }
-    if (key == LogicalKeyboardKey.keyS) {
+    if (key == LogicalKeyboardKey.keyS &&
+        !HardwareKeyboard.instance.isControlPressed) {
       if (_uvEditTool == _UvEditTool.boxSelect) {
         setState(() => _uvEditTool = _UvEditTool.idle);
       } else if (_uvSelectionReadyToMove &&
@@ -473,14 +723,6 @@ class _ModelerScreenState extends State<ModelerScreen> {
           _uvEditTool = _UvEditTool.move;
           _uvSelectionReadyToMove = false;
           _captureUvTransformStart();
-        });
-      } else if (_uvEditTool == _UvEditTool.idle) {
-        setState(() {
-          _selectedUvs.clear();
-          _uvEditTool = _UvEditTool.boxSelect;
-          _uvSelectionReadyToMove = false;
-          _uvSelectionStart = null;
-          _uvSelectionEnd = null;
         });
       }
       return KeyEventResult.handled;
@@ -508,6 +750,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         return KeyEventResult.handled;
       }
       if (_uvEditTool == _UvEditTool.awaitMirrorAxis) {
+        _recordUndo();
         setState(() {
           _uvTransformAxis = axis;
           _captureUvTransformStart();
@@ -576,6 +819,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   void _startUvGesture(Offset point, Size size) {
     _uvGestureSize = size;
+    if (_uvEditTool == _UvEditTool.move ||
+        _uvEditTool == _UvEditTool.stretch ||
+        _uvEditTool == _UvEditTool.idle) {
+      _recordUndo();
+    }
     switch (_uvEditTool) {
       case _UvEditTool.boxSelect:
         setState(() {
@@ -726,8 +974,47 @@ class _ModelerScreenState extends State<ModelerScreen> {
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final key = event.logicalKey;
+    if (HardwareKeyboard.instance.isControlPressed &&
+        key == LogicalKeyboardKey.keyZ) {
+      if (HardwareKeyboard.instance.isShiftPressed) {
+        _redo();
+      } else {
+        _undo();
+      }
+      return KeyEventResult.handled;
+    }
+    if (HardwareKeyboard.instance.isControlPressed &&
+        key == LogicalKeyboardKey.keyY) {
+      _redo();
+      return KeyEventResult.handled;
+    }
+    if (_scaleActive && _page == EditorPage.model) {
+      return _handleScaleKeyEvent(event);
+    }
     if (_page == EditorPage.uv && !HardwareKeyboard.instance.isControlPressed) {
       return _handleUvKeyEvent(key);
+    }
+    if (key == LogicalKeyboardKey.delete ||
+        key == LogicalKeyboardKey.backspace) {
+      _deleteSelection();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyA) {
+      _toggleSelectAll();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyB) {
+      setState(() {
+        _boxSelectActive = true;
+        _boxSelectionStart = null;
+        _boxSelectionEnd = null;
+      });
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyS &&
+        !HardwareKeyboard.instance.isControlPressed) {
+      _beginScale();
+      return KeyEventResult.handled;
     }
     if (_awaitingRotationAxis) {
       final axis = switch (key) {
@@ -743,6 +1030,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         setState(() {});
         return KeyEventResult.handled;
       }
+
       if (key == LogicalKeyboardKey.escape) {
         _awaitingRotationAxis = false;
         setState(() {});
@@ -879,6 +1167,139 @@ class _ModelerScreenState extends State<ModelerScreen> {
     return KeyEventResult.ignored;
   }
 
+  KeyEventResult _handleScaleKeyEvent(KeyEvent event) {
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
+      _applyScaleFactor(1);
+      if (_undoHistory.isNotEmpty) _undoHistory.removeLast();
+      setState(() {
+        _scaleActive = false;
+        _scaleFactorText = '';
+        _scaleStartPositions = [];
+        _scaleStartPointer = null;
+        _isDirty = _scaleStartDirty;
+      });
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      setState(() {
+        _scaleActive = false;
+        _scaleStartPositions = [];
+        _scaleStartPointer = null;
+      });
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.backspace) {
+      _scaleFactorText = _scaleFactorText.isEmpty
+          ? ''
+          : _scaleFactorText.substring(0, _scaleFactorText.length - 1);
+      _updateTypedScale();
+      return KeyEventResult.handled;
+    }
+    final character = event.character;
+    if (character != null && RegExp(r'^[0-9.]$').hasMatch(character)) {
+      if (!(character == '.' && _scaleFactorText.contains('.'))) {
+        _scaleFactorText += character;
+        _updateTypedScale();
+      }
+    }
+    return KeyEventResult.handled;
+  }
+
+  void _beginScale() {
+    if (_objects.isEmpty) return;
+    _recordUndo();
+    _scaleStartPositions =
+        _mesh.vertices.map((vertex) => vertex.position).toList();
+    _scaleStartDirty = _isDirty;
+    _scaleFactorText = '';
+    _scaleStartPointer = null;
+    setState(() => _scaleActive = true);
+  }
+
+  void _applyScaleFactor(double factor) {
+    if (_scaleStartPositions.length != _mesh.vertices.length) return;
+    final mesh = _mesh;
+    for (var index = 0; index < mesh.vertices.length; index++) {
+      mesh.vertices[index] = MeshVertex(_scaleStartPositions[index]);
+    }
+    mesh.scaleUniform(factor);
+    _isDirty = true;
+  }
+
+  void _updateTypedScale() {
+    final factor = double.tryParse(_scaleFactorText);
+    if (factor != null && factor.isFinite && factor > 0) {
+      setState(() => _applyScaleFactor(factor));
+    }
+  }
+
+  void _toggleSelectAll() {
+    setState(() {
+      var selectingAll = true;
+      if (_mode == EditMode.vertex) {
+        if (_selectedVertices.length == _mesh.vertices.length) {
+          _selectedVertices.clear();
+          selectingAll = false;
+        } else {
+          _selectedVertices
+            ..clear()
+            ..addAll(List.generate(_mesh.vertices.length, (index) => index));
+        }
+      } else if (_selectedFaces.length == _mesh.faces.length) {
+        _selectedFaces.clear();
+        _selectedFace = null;
+        selectingAll = false;
+      } else {
+        _selectedFaces
+          ..clear()
+          ..addAll(List.generate(_mesh.faces.length, (index) => index));
+        _selectedFace = _selectedFaces.isEmpty ? null : _selectedFaces.last;
+      }
+      if (_page == EditorPage.uv) {
+        _selectedUvs
+          ..clear()
+          ..addAll(selectingAll
+              ? [
+                  for (var faceIndex = 0;
+                      faceIndex < _mesh.faces.length;
+                      faceIndex++)
+                    for (var corner = 0;
+                        corner < _mesh.faces[faceIndex].uv.length;
+                        corner++)
+                      (faceIndex, corner),
+                ]
+              : const <(int, int)>[]);
+      }
+    });
+  }
+
+  void _deleteSelection() {
+    final facesToDelete = _selectedFaces.isNotEmpty
+        ? _selectedFaces
+        : (_selectedFace == null ? const <int>[] : [_selectedFace!]);
+    if ((_mode == EditMode.vertex && _selectedVertices.isEmpty) ||
+        (_mode == EditMode.face && facesToDelete.isEmpty)) {
+      return;
+    }
+    _recordUndo();
+    final changed = _mode == EditMode.vertex
+        ? _mesh.deleteVertices(_selectedVertices)
+        : _mesh.deleteFaces(facesToDelete);
+    if (!changed) {
+      _undoHistory.removeLast();
+      return;
+    }
+    setState(() {
+      _selectedVertices.clear();
+      _selectedFaces.clear();
+      _selectedUvs.clear();
+      _selectedFace = _mesh.faces.isEmpty ? null : 0;
+      _isDirty = true;
+    });
+  }
+
   Future<void> _loadReferenceImage() async {
     final file = await openFile(
       acceptedTypeGroups: [
@@ -897,18 +1318,22 @@ class _ModelerScreenState extends State<ModelerScreen> {
       frame.image.dispose();
       return;
     }
+    _recordUndo();
     setState(() {
-      _referenceImages.remove(_activeViewportIndex)?.dispose();
+      _referenceImages.remove(_activeViewportIndex);
       _referenceImages[_activeViewportIndex] = frame.image;
     });
   }
 
   void _removeReferenceImage() {
-    setState(() => _referenceImages.remove(_activeViewportIndex)?.dispose());
+    _recordUndo();
+    setState(() => _referenceImages.remove(_activeViewportIndex));
   }
 
   void _connectVertices() {
+    _recordUndo();
     if (!_mesh.addQuad(_selectedVertices)) {
+      _undoHistory.removeLast();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Select four new, distinct vertices to make a quad.'),
@@ -928,8 +1353,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _mergeSelectedTriangles() {
+    _recordUndo();
     final merged = _mesh.mergeTriangles(_selectedFaces);
     if (merged == null) {
+      _undoHistory.removeLast();
       _showMessage('Select two adjacent triangular faces to make a quad.');
       return;
     }
@@ -960,6 +1387,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _addStripPoint(Offset point, Size size, ViewportState viewport) {
+    _recordUndo();
     final vertex = _mesh.addVertex(_worldPosition(point, size, viewport));
     if (_stripEdge.length < 2) {
       setState(() {
@@ -973,6 +1401,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
     }
     if (!_mesh.addTriangle([_stripEdge[0], _stripEdge[1], vertex])) {
       _mesh.vertices.removeLast();
+      _undoHistory.removeLast();
       _showMessage('That point would create a duplicate or flat triangle.');
       return;
     }
@@ -1011,6 +1440,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _rotateSelection(MeshAxis axis, double degrees) {
+    _recordUndo();
     if (!_mesh.rotateVertices(
       _verticesToRotate,
       axis.index,
@@ -1091,7 +1521,12 @@ class _ModelerScreenState extends State<ModelerScreen> {
         ],
       ),
     );
-    if (axis == null || !_mesh.mirror(axis.index)) return;
+    if (axis == null) return;
+    _recordUndo();
+    if (!_mesh.mirror(axis.index)) {
+      _undoHistory.removeLast();
+      return;
+    }
     setState(() {
       _selectedVertices.clear();
       _selectedFaces.clear();
@@ -1124,8 +1559,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
     );
     if (confirmed != true) return;
     if (index >= _objects.length || !identical(_objects[index], object)) return;
-    final removed = _objects[index];
-    removed.textureImage?.dispose();
+    _recordUndo();
     setState(() {
       if (_objects.length == 1) {
         _objects[0] = SceneObject('Mesh_1', MeshModel.empty());
@@ -1180,6 +1614,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         !identical(_objects[index], object)) {
       return;
     }
+    _recordUndo();
     setState(() {
       object.name = trimmed;
       _isDirty = true;
@@ -1212,6 +1647,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       image?.dispose();
       return;
     }
+    _recordUndo();
     final copyName = _uniqueMeshName('${source.name}_copy');
     setState(() {
       _objects.add(
@@ -1268,16 +1704,47 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _deleteFace() {
-    final face = _selectedFace;
-    if (face == null || !_mesh.removeFace(face)) return;
-    setState(() {
-      _selectedFace = _mesh.faces.isEmpty
-          ? null
-          : (face < _mesh.faces.length ? face : _mesh.faces.length - 1);
+    if (_selectedFaces.isNotEmpty) {
+      _deleteSelection();
+    } else if (_selectedFace != null) {
       _selectedFaces
         ..clear()
-        ..addAll(_selectedFace == null ? const [] : [_selectedFace!]);
-      _isDirty = true;
+        ..add(_selectedFace!);
+      _deleteSelection();
+    }
+  }
+
+  void _selectModelBox(Rect selection, Size size, ViewportState viewport) {
+    setState(() {
+      _selectedVertices.clear();
+      _selectedFaces.clear();
+      if (_mode == EditMode.vertex) {
+        for (var index = 0; index < _mesh.vertices.length; index++) {
+          if (selection.contains(
+            _project(_mesh.vertices[index].position, size, viewport),
+          )) {
+            _selectedVertices.add(index);
+          }
+        }
+      } else {
+        for (var faceIndex = 0; faceIndex < _mesh.faces.length; faceIndex++) {
+          final face = _mesh.faces[faceIndex];
+          final points = face.vertices
+              .map((index) =>
+                  _project(_mesh.vertices[index].position, size, viewport))
+              .toList();
+          if (points.isNotEmpty &&
+              selection.contains(Offset(
+                points.map((point) => point.dx).reduce((a, b) => a + b) /
+                    points.length,
+                points.map((point) => point.dy).reduce((a, b) => a + b) /
+                    points.length,
+              ))) {
+            _selectedFaces.add(faceIndex);
+          }
+        }
+        _selectedFace = _selectedFaces.isEmpty ? null : _selectedFaces.last;
+      }
     });
   }
 
@@ -1291,6 +1758,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       return;
     }
     if (_tool == ActiveTool.addVertex && _mode == EditMode.vertex) {
+      _recordUndo();
       final index = _mesh.addVertex(_worldPosition(point, size, viewport));
       setState(() {
         _selectedVertices.add(index);
@@ -1539,6 +2007,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         }
         return;
       }
+      _recordUndo();
       setState(() {
         _objects.addAll(loadedObjects);
         _activeObjectIndex = _objects.length - loadedObjects.length;
@@ -1586,6 +2055,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ),
         );
       }
+      _undoHistory.clear();
+      _redoHistory.clear();
       for (final object in _objects) {
         object.textureImage?.dispose();
       }
@@ -1645,6 +2116,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   Future<void> _newScene() async {
     if (!await _confirmUnsavedChanges()) return;
+    _undoHistory.clear();
+    _redoHistory.clear();
     for (final object in _objects) {
       object.textureImage?.dispose();
     }
@@ -1684,7 +2157,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
     try {
       final image = await _decodeImage(await File(file.path).readAsBytes());
       final object = _objects[_activeObjectIndex];
-      object.textureImage?.dispose();
+      _recordUndo();
       setState(() {
         object.texturePath = file.path;
         object.textureImage = image;
@@ -1696,7 +2169,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _smartUvRemap() {
+    _recordUndo();
     if (!_mesh.smartUvRemap()) {
+      _undoHistory.removeLast();
       _showMessage('Add faces before creating a smart UV layout.');
       return;
     }
@@ -1967,6 +2442,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     color: const Color(0xFF48505E),
                     margin: const EdgeInsets.symmetric(horizontal: 3),
                   ),
+                  _buildHistoryButtons(),
                   if (_page == EditorPage.model)
                     _buildCompactEditorTools()
                   else
@@ -2208,6 +2684,28 @@ class _ModelerScreenState extends State<ModelerScreen> {
     );
   }
 
+  Widget _buildHistoryButtons() => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: 'Undo (Ctrl+Z)',
+            onPressed: _undoHistory.isEmpty ? null : _undo,
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints.tightFor(width: 30, height: 30),
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.undo_rounded, size: 17),
+          ),
+          IconButton(
+            tooltip: 'Redo (Ctrl+Y)',
+            onPressed: _redoHistory.isEmpty ? null : _redo,
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints.tightFor(width: 30, height: 30),
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.redo_rounded, size: 17),
+          ),
+        ],
+      );
+
   Widget _compactTool({
     required String label,
     required IconData icon,
@@ -2296,6 +2794,23 @@ class _ModelerScreenState extends State<ModelerScreen> {
           Expanded(child: panes[0]),
           const SizedBox(width: 6),
           Expanded(child: panes[1]),
+        ],
+      );
+    }
+    if (_visibleViewportCount == 3) {
+      return Column(
+        children: [
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(child: panes[0]),
+                const SizedBox(width: 6),
+                Expanded(child: panes[1]),
+              ],
+            ),
+          ),
+          const SizedBox(height: 6),
+          Expanded(child: panes[2]),
         ],
       );
     }
@@ -2564,137 +3079,204 @@ class _ModelerScreenState extends State<ModelerScreen> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final size = Size(constraints.maxWidth, constraints.maxHeight);
-          return Listener(
-            onPointerSignal: (event) {
-              if (event is PointerScrollEvent) {
-                _activeViewportIndex = viewportIndex;
-                final keyboard = HardwareKeyboard.instance;
-                if (keyboard.isLogicalKeyPressed(
-                  LogicalKeyboardKey.controlLeft,
-                )) {
-                  setState(() {
-                    viewport.pan += Offset(-event.scrollDelta.dy, 0);
-                  });
-                } else if (keyboard.isLogicalKeyPressed(
-                  LogicalKeyboardKey.shiftLeft,
-                )) {
-                  setState(() {
-                    viewport.pan += Offset(0, -event.scrollDelta.dy);
-                  });
-                } else {
-                  setState(() {
-                    viewport.zoom = _zoomForWheel(
-                      event.scrollDelta.dy,
-                      viewport.zoom,
+          return MouseRegion(
+            cursor: _boxSelectActive
+                ? SystemMouseCursors.precise
+                : SystemMouseCursors.basic,
+            child: Listener(
+              onPointerSignal: (event) {
+                if (event is PointerScrollEvent) {
+                  _activeViewportIndex = viewportIndex;
+                  final keyboard = HardwareKeyboard.instance;
+                  if (keyboard.isLogicalKeyPressed(
+                    LogicalKeyboardKey.controlLeft,
+                  )) {
+                    setState(() {
+                      viewport.pan += Offset(-event.scrollDelta.dy, 0);
+                    });
+                  } else if (keyboard.isLogicalKeyPressed(
+                    LogicalKeyboardKey.shiftLeft,
+                  )) {
+                    setState(() {
+                      viewport.pan += Offset(0, -event.scrollDelta.dy);
+                    });
+                  } else {
+                    setState(() {
+                      viewport.zoom = _zoomForWheel(
+                        event.scrollDelta.dy,
+                        viewport.zoom,
+                      );
+                    });
+                  }
+                }
+              },
+              child: GestureDetector(
+                key: ValueKey(
+                  viewportIndex == 0
+                      ? 'modelViewport'
+                      : 'modelViewport$viewportIndex',
+                ),
+                behavior: HitTestBehavior.opaque,
+                onTapDown: (_) => _activateViewport(viewportIndex),
+                onTapUp: (details) =>
+                    _handleModelTap(details.localPosition, size, viewport),
+                onScaleStart: (details) {
+                  _activeViewportIndex = viewportIndex;
+                  _gestureAnchor = details.focalPoint;
+                  _gestureZoomStart = viewport.zoom;
+                  if (_boxSelectActive) {
+                    _boxSelectionStart = details.localFocalPoint;
+                    _boxSelectionEnd = details.localFocalPoint;
+                  } else if (_scaleActive) {
+                    _scaleStartPointer = details.localFocalPoint;
+                  } else if (_tool == ActiveTool.move && _lockedAxis != null) {
+                    _recordUndo();
+                  }
+                },
+                onScaleUpdate: (details) {
+                  if (_boxSelectActive) {
+                    setState(() => _boxSelectionEnd = details.localFocalPoint);
+                  } else if (_scaleActive) {
+                    final start = _scaleStartPointer;
+                    if (start != null) {
+                      final factor = math.exp(
+                        (details.localFocalPoint.dx - start.dx) / 100,
+                      );
+                      setState(() => _applyScaleFactor(factor));
+                    }
+                  } else if (details.pointerCount >= 2) {
+                    setState(() {
+                      viewport.pan += details.focalPoint - _gestureAnchor;
+                      viewport.zoom = (_gestureZoomStart * details.scale)
+                          .clamp(_minZoom, _maxZoom)
+                          .toDouble();
+                      _gestureAnchor = details.focalPoint;
+                    });
+                  } else if (_tool == ActiveTool.move && _lockedAxis != null) {
+                    _moveSelectedAlongAxis(
+                      details.focalPointDelta,
+                      size,
+                      viewport,
                     );
-                  });
-                }
-              }
-            },
-            child: GestureDetector(
-              key: ValueKey(
-                viewportIndex == 0
-                    ? 'modelViewport'
-                    : 'modelViewport$viewportIndex',
-              ),
-              behavior: HitTestBehavior.opaque,
-              onTapDown: (_) => _activateViewport(viewportIndex),
-              onTapUp: (details) =>
-                  _handleModelTap(details.localPosition, size, viewport),
-              onScaleStart: (details) {
-                _activeViewportIndex = viewportIndex;
-                _gestureAnchor = details.focalPoint;
-                _gestureZoomStart = viewport.zoom;
-              },
-              onScaleUpdate: (details) {
-                if (details.pointerCount >= 2) {
-                  setState(() {
-                    viewport.pan += details.focalPoint - _gestureAnchor;
-                    viewport.zoom = (_gestureZoomStart * details.scale)
-                        .clamp(_minZoom, _maxZoom)
-                        .toDouble();
-                    _gestureAnchor = details.focalPoint;
-                  });
-                } else if (_tool == ActiveTool.move && _lockedAxis != null) {
-                  _moveSelectedAlongAxis(
-                    details.focalPointDelta,
-                    size,
-                    viewport,
-                  );
-                } else if (_tool != ActiveTool.addVertex &&
-                    _tool != ActiveTool.strip &&
-                    _tool != ActiveTool.move) {
-                  setState(() {
-                    viewport.preset = ViewPreset.free;
-                    viewport.yaw += details.focalPointDelta.dx * 0.008;
-                    viewport.pitch =
-                        (viewport.pitch + details.focalPointDelta.dy * 0.008)
-                            .clamp(-3.13, 3.13)
-                            .toDouble();
-                  });
-                }
-              },
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  CustomPaint(
-                    painter: _ViewportPainter(
-                      meshes: _objects.map((object) => object.mesh).toList(),
-                      textures: _objects
-                          .map((object) => object.textureImage)
-                          .toList(),
-                      activeMeshIndex: _activeObjectIndex,
-                      selectedVertices: _selectedVertices,
-                      selectedFaces: _selectedFaces,
-                      selectedFace: _selectedFace,
-                      project: (point) => _project(point, size, viewport),
-                      basis: _viewBasis(viewport),
-                      viewPreset: viewport.preset,
-                      referenceImage: _referenceImages[viewportIndex],
-                      referenceOpacity: _referenceOpacity,
-                      viewStyle: _viewStyle,
-                      fade: ((viewport.zoom - _minZoom) / 0.18).clamp(0.0, 1.0),
-                      showVertices: _mode == EditMode.vertex ||
-                          _viewStyle == ViewStyle.wireframe,
+                  } else if (_tool != ActiveTool.addVertex &&
+                      _tool != ActiveTool.strip &&
+                      _tool != ActiveTool.move) {
+                    setState(() {
+                      viewport.preset = ViewPreset.free;
+                      viewport.yaw += details.focalPointDelta.dx * 0.008;
+                      viewport.pitch =
+                          (viewport.pitch + details.focalPointDelta.dy * 0.008)
+                              .clamp(-3.13, 3.13)
+                              .toDouble();
+                    });
+                  }
+                },
+                onScaleEnd: (_) {
+                  if (_boxSelectActive) {
+                    final start = _boxSelectionStart;
+                    final end = _boxSelectionEnd;
+                    if (start != null && end != null) {
+                      _selectModelBox(
+                        Rect.fromPoints(start, end),
+                        size,
+                        viewport,
+                      );
+                    }
+                    setState(() {
+                      _boxSelectActive = false;
+                      _boxSelectionStart = null;
+                      _boxSelectionEnd = null;
+                    });
+                  }
+                },
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    CustomPaint(
+                      painter: _ViewportPainter(
+                        meshes: _objects.map((object) => object.mesh).toList(),
+                        textures: _objects
+                            .map((object) => object.textureImage)
+                            .toList(),
+                        activeMeshIndex: _activeObjectIndex,
+                        selectedVertices: _selectedVertices,
+                        selectedFaces: _selectedFaces,
+                        selectedFace: _selectedFace,
+                        project: (point) => _project(point, size, viewport),
+                        basis: _viewBasis(viewport),
+                        viewPreset: viewport.preset,
+                        referenceImage: _referenceImages[viewportIndex],
+                        selectionRect: _boxSelectionStart == null ||
+                                _boxSelectionEnd == null
+                            ? null
+                            : Rect.fromPoints(
+                                _boxSelectionStart!,
+                                _boxSelectionEnd!,
+                              ),
+                        referenceOpacity: _referenceOpacity,
+                        viewStyle: _viewStyle,
+                        fade:
+                            ((viewport.zoom - _minZoom) / 0.18).clamp(0.0, 1.0),
+                        showVertices: _mode == EditMode.vertex ||
+                            _viewStyle == ViewStyle.wireframe,
+                      ),
                     ),
-                  ),
-                  Positioned(
-                    right: 12,
-                    bottom: 12,
-                    child: _zoomControls(size, viewport, viewportIndex),
-                  ),
-                  Positioned(
-                    left: 12,
-                    top: 10,
-                    child: Text(
-                      _viewName(viewport.preset),
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: Colors.white70,
+                    Positioned(
+                      right: 12,
+                      bottom: 12,
+                      child: _zoomControls(size, viewport, viewportIndex),
+                    ),
+                    if (_visibleViewportCount > 1)
+                      Positioned(
+                        left: 7,
+                        bottom: 7,
+                        child: IconButton(
+                          tooltip: 'Close this viewport',
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints.tightFor(
+                              width: 28, height: 28),
+                          padding: EdgeInsets.zero,
+                          style: IconButton.styleFrom(
                             backgroundColor: const Color(0xAA171B23),
+                            foregroundColor: Colors.white70,
                           ),
+                          onPressed: () => _closeViewport(viewportIndex),
+                          icon: const Icon(Icons.close, size: 15),
+                        ),
+                      ),
+                    Positioned(
+                      left: 12,
+                      top: 10,
+                      child: Text(
+                        _viewName(viewport.preset),
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: Colors.white70,
+                              backgroundColor: const Color(0xAA171B23),
+                            ),
+                      ),
                     ),
-                  ),
-                  Positioned(
-                    right: 8,
-                    top: 48,
-                    child: PopupMenuButton<ViewPreset>(
-                      tooltip: 'Change view',
-                      icon: const Icon(Icons.visibility_outlined, size: 19),
-                      onOpened: () => _activateViewport(viewportIndex),
-                      onSelected: (view) {
-                        _activateViewport(viewportIndex);
-                        _setView(view);
-                      },
-                      itemBuilder: (context) => [
-                        for (final view in ViewPreset.values)
-                          PopupMenuItem(
-                            value: view,
-                            child: Text(_viewName(view)),
-                          ),
-                      ],
+                    Positioned(
+                      right: 8,
+                      top: 48,
+                      child: PopupMenuButton<ViewPreset>(
+                        tooltip: 'Change view',
+                        icon: const Icon(Icons.visibility_outlined, size: 19),
+                        onOpened: () => _activateViewport(viewportIndex),
+                        onSelected: (view) {
+                          _activateViewport(viewportIndex);
+                          _setView(view);
+                        },
+                        itemBuilder: (context) => [
+                          for (final view in ViewPreset.values)
+                            PopupMenuItem(
+                              value: view,
+                              child: Text(_viewName(view)),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           );
@@ -2914,10 +3496,15 @@ class _ModelerScreenState extends State<ModelerScreen> {
           : '';
       return _selectedFace == null
           ? '${_selectedUvs.length} UVs selected · '
-              'S: select/move · E: stretch · M: mirror$textureHint'
+              'B: box select · S: move · E: stretch · M: mirror$textureHint'
           : 'Face ${_selectedFace! + 1} · ${_selectedUvs.length} UVs · '
-              'S: select/move · E: stretch · M: mirror$textureHint';
+              'B: box select · S: move · E: stretch · M: mirror$textureHint';
     }
+    if (_scaleActive) {
+      return 'Scale ${_scaleFactorText.isEmpty ? 'by dragging or type a factor' : _scaleFactorText}'
+          ' · Enter confirms · Esc cancels';
+    }
+    if (_boxSelectActive) return 'Box select · drag to select elements';
     if (_tool == ActiveTool.addVertex) {
       return 'Tap the surface to place a vertex';
     }
@@ -2992,6 +3579,7 @@ class _ViewportPainter extends CustomPainter {
     required this.basis,
     required this.viewPreset,
     required this.referenceImage,
+    required this.selectionRect,
     required this.referenceOpacity,
     required this.viewStyle,
     required this.fade,
@@ -3008,6 +3596,7 @@ class _ViewportPainter extends CustomPainter {
   final _ViewBasis basis;
   final ViewPreset viewPreset;
   final ui.Image? referenceImage;
+  final Rect? selectionRect;
   final double referenceOpacity;
   final ViewStyle viewStyle;
   final double fade;
@@ -3187,6 +3776,22 @@ class _ViewportPainter extends CustomPainter {
       );
     }
     _drawAxis(canvas);
+    final selection = selectionRect;
+    if (selection != null) {
+      canvas.drawRect(
+        selection,
+        Paint()
+          ..color = const Color(0x336CA8FF)
+          ..style = PaintingStyle.fill,
+      );
+      canvas.drawRect(
+        selection,
+        Paint()
+          ..color = const Color(0xFF78B3FF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
+      );
+    }
   }
 
   void _drawTexturedFace(

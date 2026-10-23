@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.03** — Windows-first polygon modeling MVP.
+**Version 1.04** — Windows-first polygon modeling MVP.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
@@ -84,7 +84,19 @@ flutter test
   out.
 - Choose **Add → Scene: 2 views** or **4 views** to edit with independent
   cameras. Use the eye menu in each viewport to choose its view; edits to the
-  shared mesh appear in every viewport.
+  shared mesh appear in every viewport. Click the small **×** in a viewport's
+  lower-left corner to close that pane; the final pane cannot be closed.
+- Press **A** to select all vertices or faces in the current edit mode, and
+  press **A** again to clear the selection. Drag a box with **B** in Model or
+  UV view to select elements or UV corners. In Model view, **Delete** or
+  **Backspace** removes the selected vertices or faces; deleting a vertex also
+  removes faces that use it.
+- Press **S** in Model view and drag horizontally to scale the active mesh
+  uniformly, or type a positive factor such as `1.25` or `0.75`; the change is
+  previewed immediately. Press **Enter** to accept or **Esc** to cancel.
+- Undo and redo with **Ctrl+Z** and **Ctrl+Y** (or the toolbar arrow buttons).
+  Modeling, mesh, UV, scaling, and viewport-close actions are recorded in a
+  bounded history.
 - Hold **Left Ctrl** while scrolling to pan the active viewport horizontally;
   hold **Left Shift** while scrolling to pan it vertically.
 - Collapse the scene panel with its left-chevron button; reopen it with the
@@ -97,10 +109,10 @@ flutter test
   UV island into a separate tile in the 0–1 texture space. Select a face in
   Model view to drag its UV corners manually. Use **Add texture** in the UV
   toolbar to assign a texture to the active mesh; it remains linked to that
-  mesh and is used in Textured view. In the UV editor, press **S** and drag a
-  box to select UV corners across the active mesh; press **S** again, drag,
-  then **Enter** to move the selection. Press **E**, then **X** or **Y**, and
-  drag to stretch along that UV axis; **M**, then **X** or **Y**, mirrors the
+  mesh and is used in Textured view. In the UV editor, press **B** and drag a
+  box to select UV corners across the active mesh; press **S**, drag, then
+  **Enter** to move the selection. Press **E**, then **X** or **Y**, and drag
+  to stretch along that UV axis; **M**, then **X** or **Y**, mirrors the
   selection. **Enter** confirms UV transforms and **Esc** cancels a transform.
 - Switch between **Solid**, **Textured**, and **Wireframe** from the **Scene**
   menu. Texture preview displays an assigned image when available; otherwise

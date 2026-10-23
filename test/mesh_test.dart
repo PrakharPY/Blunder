@@ -112,6 +112,62 @@ void main() {
       expect(mesh.vertices[0].position.y, -1);
     });
 
+    test('uniformly scales around the mesh centroid', () {
+      final mesh = MeshModel.starterPlane();
+
+      expect(mesh.scaleUniform(1.25), isTrue);
+      expect(mesh.vertices[0].position.x, closeTo(-1.25, 1e-9));
+      expect(mesh.vertices[0].position.y, closeTo(-1.25, 1e-9));
+      expect(mesh.vertices[2].position.x, closeTo(1.25, 1e-9));
+      expect(mesh.vertices[2].position.y, closeTo(1.25, 1e-9));
+      expect(mesh.scaleUniform(0), isFalse);
+      expect(mesh.scaleUniform(double.nan), isFalse);
+    });
+
+    test('deletes selected vertices and incident faces with remapped indices',
+        () {
+      final mesh = MeshModel.fromData(
+        const [
+          Vec3(0, 0, 0),
+          Vec3(1, 0, 0),
+          Vec3(1, 1, 0),
+          Vec3(0, 1, 0),
+          Vec3(2, 0, 0),
+        ],
+        [
+          MeshFace(
+            [0, 1, 2, 3],
+            const [
+              Offset(0, 0),
+              Offset(1, 0),
+              Offset(1, 1),
+              Offset(0, 1),
+            ],
+          ),
+          MeshFace(
+            [1, 4, 2],
+            const [Offset.zero, Offset(1, 0), Offset(1, 1)],
+          ),
+        ],
+      );
+
+      expect(mesh.deleteVertices([0]), isTrue);
+      expect(mesh.vertices, hasLength(4));
+      expect(mesh.faces, hasLength(1));
+      expect(mesh.faces.single.vertices, [0, 3, 1]);
+      expect(mesh.deleteVertices([8]), isFalse);
+    });
+
+    test('deletes multiple faces while keeping remaining face topology', () {
+      final mesh = MeshModel.starterPlane();
+      mesh.duplicateFace(0);
+
+      expect(mesh.deleteFaces([0]), isTrue);
+      expect(mesh.faces, hasLength(1));
+      expect(mesh.faces.single.vertices, [4, 5, 6, 7]);
+      expect(mesh.deleteFaces([4]), isFalse);
+    });
+
     test('rejects invalid, duplicate, and degenerate selections', () {
       final mesh = MeshModel.empty()
         ..addVertex(const Vec3(0, 0, 0))

@@ -22,7 +22,7 @@ void main() {
 
     expect(
       find.text(
-        'Face 1 · 0 UVs · S: select/move · E: stretch · M: mirror · '
+        'Face 1 · 0 UVs · B: box select · S: move · E: stretch · M: mirror · '
         'choose a texture',
       ),
       findsOneWidget,
@@ -46,7 +46,7 @@ void main() {
         tester.getRect(find.byKey(const ValueKey('uvEditorCanvas')));
     final uvScale = canvasRect.shortestSide * 0.72;
     final uvOrigin = canvasRect.center - Offset(uvScale / 2, uvScale / 2);
-    await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyB);
     await tester.pumpAndSettle();
     expect(
       find.text('UV box select · drag a box around UV corners'),
@@ -59,7 +59,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       find.text(
-        'Face 1 · 4 UVs · S: select/move · E: stretch · M: mirror · '
+        'Face 1 · 4 UVs · B: box select · S: move · E: stretch · M: mirror · '
         'choose a texture',
       ),
       findsOneWidget,
@@ -298,6 +298,110 @@ void main() {
     expect(find.text('Free'), findsOneWidget);
     expect(find.text('Left'), findsOneWidget);
     expect(find.text('Top'), findsOneWidget);
+  });
+
+  testWidgets('closes viewport panes and keeps one viewport open',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Add menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Scene: 4 views'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Close this viewport'), findsNWidgets(4));
+    await tester.tap(find.byTooltip('Close this viewport').first);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Close this viewport'), findsNWidgets(3));
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Close this viewport'), findsNWidgets(4));
+
+    for (var count = 4; count > 1; count--) {
+      await tester.tap(find.byTooltip('Close this viewport').first);
+      await tester.pumpAndSettle();
+    }
+    expect(find.byTooltip('Close this viewport'), findsNothing);
+    expect(find.byKey(const ValueKey('modelViewport')), findsOneWidget);
+  });
+
+  testWidgets('A toggles selection, Delete removes vertices, and undo restores',
+      (tester) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+    await tester.pumpAndSettle();
+    expect(find.text('Free view · 4 vertices selected'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+    await tester.pumpAndSettle();
+    expect(find.text('Free view · 0 vertices selected'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+    await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+    await tester.pumpAndSettle();
+    expect(find.text('Free view · 0 vertices selected'), findsOneWidget);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.text('Free view · 4 vertices selected'), findsOneWidget);
+  });
+
+  testWidgets('B box-selects vertices in the model viewport', (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    final viewport =
+        tester.getRect(find.byKey(const ValueKey('modelViewport')));
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyB);
+    await tester.dragFrom(
+      viewport.topLeft + const Offset(2, 2),
+      viewport.bottomRight - viewport.topLeft - const Offset(4, 4),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Free view · 4 vertices selected'), findsOneWidget);
+  });
+
+  testWidgets('S accepts a typed proportional scale and undo is available',
+      (tester) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit1, character: '1');
+    await tester.sendKeyEvent(LogicalKeyboardKey.period, character: '.');
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit2, character: '2');
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit5, character: '5');
+    await tester.pumpAndSettle();
+    expect(
+        find.text('Scale 1.25 · Enter confirms · Esc cancels'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Undo (Ctrl+Z)'), findsOneWidget);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
   });
 
   testWidgets('Strip continuously adds connected triangle faces',

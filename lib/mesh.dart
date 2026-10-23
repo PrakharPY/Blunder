@@ -338,6 +338,72 @@ class MeshModel {
     return true;
   }
 
+  bool scaleUniform(double factor) {
+    if (vertices.isEmpty || !factor.isFinite || factor <= 0) return false;
+    final center = Vec3(
+      vertices.map((vertex) => vertex.position.x).reduce((a, b) => a + b) /
+          vertices.length,
+      vertices.map((vertex) => vertex.position.y).reduce((a, b) => a + b) /
+          vertices.length,
+      vertices.map((vertex) => vertex.position.z).reduce((a, b) => a + b) /
+          vertices.length,
+    );
+    for (var index = 0; index < vertices.length; index++) {
+      final point = vertices[index].position;
+      vertices[index] = MeshVertex(
+        Vec3(
+          center.x + (point.x - center.x) * factor,
+          center.y + (point.y - center.y) * factor,
+          center.z + (point.z - center.z) * factor,
+        ),
+      );
+    }
+    return true;
+  }
+
+  bool deleteVertices(Iterable<int> selectedVertices) {
+    final selection = selectedVertices.toSet();
+    if (selection.isEmpty ||
+        selection.any((index) => index < 0 || index >= vertices.length)) {
+      return false;
+    }
+    faces.removeWhere((face) => face.vertices.any(selection.contains));
+    final remap = <int, int>{};
+    final remaining = <MeshVertex>[];
+    for (var index = 0; index < vertices.length; index++) {
+      if (selection.contains(index)) continue;
+      remap[index] = remaining.length;
+      remaining.add(vertices[index]);
+    }
+    for (var index = 0; index < faces.length; index++) {
+      final face = faces[index];
+      faces[index] = MeshFace(
+        face.vertices.map((vertex) => remap[vertex]!).toList(),
+        face.uv,
+      );
+    }
+    vertices
+      ..clear()
+      ..addAll(remaining);
+    return true;
+  }
+
+  bool deleteFaces(Iterable<int> selectedFaces) {
+    final selection = selectedFaces.toSet();
+    if (selection.isEmpty ||
+        selection.any((index) => index < 0 || index >= faces.length)) {
+      return false;
+    }
+    final remainingFaces = <MeshFace>[
+      for (var index = 0; index < faces.length; index++)
+        if (!selection.contains(index)) faces[index],
+    ];
+    faces
+      ..clear()
+      ..addAll(remainingFaces);
+    return true;
+  }
+
   bool addQuad(Iterable<int> selectedVertices) {
     final selection = selectedVertices.toSet().toList();
     if (selection.length != 4 ||
