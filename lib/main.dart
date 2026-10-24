@@ -11,7 +11,7 @@ import 'package:flutter/services.dart';
 import 'mesh.dart';
 import 'model_io.dart';
 
-const String _appVersion = '1.05';
+const String _appVersion = '1.06';
 
 void main(List<String> args) {
   String? initialPkyPath;
@@ -53,7 +53,7 @@ enum EditMode { vertex, face }
 
 enum EditorPage { model, uv }
 
-enum ActiveTool { select, addVertex, strip, move }
+enum ActiveTool { select, addVertex, addSurface, strip, move }
 
 enum ViewPreset { free, front, back, right, left, top, bottom }
 
@@ -80,6 +80,7 @@ class _SceneObjectSnapshot {
     required this.texturePath,
     required this.textureImage,
     required this.groupName,
+    required this.visible,
   });
 
   final String name;
@@ -87,6 +88,7 @@ class _SceneObjectSnapshot {
   final String? texturePath;
   final ui.Image? textureImage;
   final String? groupName;
+  final bool visible;
 }
 
 class _ViewportSnapshot {
@@ -112,6 +114,7 @@ class _EditorSnapshot {
     required this.visibleViewportCount,
     required this.activeViewportIndex,
     required this.activeObjectIndex,
+    required this.selectedMeshIndices,
     required this.mode,
     required this.page,
     required this.tool,
@@ -128,6 +131,7 @@ class _EditorSnapshot {
   final int visibleViewportCount;
   final int activeViewportIndex;
   final int activeObjectIndex;
+  final Set<int> selectedMeshIndices;
   final EditMode mode;
   final EditorPage page;
   final ActiveTool tool;
@@ -156,6 +160,7 @@ class SceneObject {
     this.texturePath,
     this.textureImage,
     this.groupName,
+    this.visible = true,
   });
 
   String name;
@@ -163,6 +168,7 @@ class SceneObject {
   String? texturePath;
   ui.Image? textureImage;
   String? groupName;
+  bool visible;
 }
 
 class _ViewBasis {
@@ -197,6 +203,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   int _visibleViewportCount = 1;
   bool _isSidePanelVisible = true;
   int _activeObjectIndex = 0;
+  final Set<int> _selectedMeshIndices = {0};
   MeshModel get _mesh => _objects[_activeObjectIndex].mesh;
 
   EditMode _mode = EditMode.vertex;
@@ -243,6 +250,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
   bool _boxSelectActive = false;
   Offset? _boxSelectionStart;
   Offset? _boxSelectionEnd;
+  Offset? _surfaceSelectionStart;
+  Offset? _surfaceSelectionEnd;
   bool _scaleActive = false;
   String _scaleFactorText = '';
   List<Vec3> _scaleStartPositions = [];
@@ -281,9 +290,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
   void _resetPlane() {
     _recordUndo();
     setState(() {
+      final object = _objects[_activeObjectIndex];
       _objects[_activeObjectIndex] = SceneObject(
-        _objects[_activeObjectIndex].name,
+        object.name,
         MeshModel.starterPlane(),
+        visible: object.visible,
       );
       _selectedVertices.clear();
       _selectedFaces.clear();
@@ -307,6 +318,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
         SceneObject('Mesh_${_objects.length + 1}', mesh),
       );
       _activeObjectIndex = _objects.length - 1;
+      _selectedMeshIndices
+        ..clear()
+        ..add(_activeObjectIndex);
       _selectedVertices.clear();
       _selectedFaces.clear();
       _selectedFace = 0;
@@ -316,16 +330,126 @@ class _ModelerScreenState extends State<ModelerScreen> {
     });
   }
 
-  void _selectMesh(int index) {
-    if (index == _activeObjectIndex) return;
+  void _selectMesh(int index, {bool toggle = false}) {
     setState(() {
+      final changedActive = index != _activeObjectIndex;
       _activeObjectIndex = index;
+      if (changedActive) {
+        _selectedVertices.clear();
+        _selectedFaces.clear();
+        _selectedFace = _mesh.faces.isEmpty ? null : 0;
+      }
+      if (toggle) {
+        if (!_selectedMeshIndices.add(index)) {
+          _selectedMeshIndices.remove(index);
+        }
+      } else {
+        _selectedMeshIndices
+          ..clear()
+          ..add(index);
+        if (!changedActive) {
+          _selectedVertices.clear();
+          _selectedFaces.clear();
+          _selectedFace = _mesh.faces.isEmpty ? null : 0;
+        }
+        _tool = ActiveTool.select;
+        _lockedAxis = null;
+      }
+    });
+  }
+
+  void _toggleMeshVisibility(int index) {
+    if (index < 0 || index >= _objects.length) return;
+    _recordUndo();
+    setState(() {
+      final object = _objects[index];
+      object.visible = !object.visible;
+      if (!object.visible) _selectedMeshIndices.remove(index);
+      _isDirty = true;
+    });
+  }
+
+  Future<void> _joinSelectedMeshes() async {
+    final indices = _selectedMeshIndices
+        .where((index) => index >= 0 && index < _objects.length)
+        .where((index) => _objects[index].visible)
+        .toList()
+      ..sort();
+    if (indices.length < 2) {
+      _showMessage('Select at least two visible meshes to join.');
+      return;
+    }
+    var name = 'JoinedMesh';
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Join meshes'),
+        content: TextField(
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'New mesh name'),
+          onChanged: (value) => name = value,
+          onSubmitted: (_) => Navigator.pop(context, true),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Join'),
+          ),
+        ],
+      ),
+    );
+    final trimmedName = name.trim();
+    if (accepted != true || !mounted) return;
+    if (trimmedName.isEmpty ||
+        _objects.asMap().entries.any(
+              (entry) =>
+                  !indices.contains(entry.key) &&
+                  entry.value.name.toLowerCase() == trimmedName.toLowerCase(),
+            )) {
+      _showMessage('Enter a unique, non-empty mesh name.');
+      return;
+    }
+
+    final sources = indices.map((index) => _objects[index]).toList();
+    final merged = MeshModel.join(sources.map((object) => object.mesh));
+    final firstIndex = indices.first;
+    final mergedIndex =
+        firstIndex - indices.takeWhile((index) => index < firstIndex).length;
+    final texturePath = sources.first.texturePath;
+    final sameTexture = sources.every(
+      (object) => object.texturePath == texturePath,
+    );
+    _recordUndo();
+    setState(() {
+      _objects
+        ..removeWhere((object) => sources.contains(object))
+        ..insert(
+          mergedIndex,
+          SceneObject(
+            trimmedName,
+            merged,
+            texturePath: sameTexture ? texturePath : null,
+            textureImage: sameTexture ? sources.first.textureImage : null,
+          ),
+        );
+      _activeObjectIndex = mergedIndex;
+      _selectedMeshIndices
+        ..clear()
+        ..add(mergedIndex);
       _selectedVertices.clear();
       _selectedFaces.clear();
-      _selectedFace = _mesh.faces.isEmpty ? null : 0;
-      _tool = ActiveTool.select;
-      _lockedAxis = null;
+      _selectedFace = merged.faces.isEmpty ? null : 0;
+      _mode = EditMode.vertex;
+      _isDirty = true;
     });
+    if (!sameTexture) {
+      _showMessage(
+          'Joined meshes. Different source textures were not retained.');
+    }
   }
 
   void _setView(ViewPreset preset) {
@@ -368,6 +492,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
               texturePath: object.texturePath,
               textureImage: object.textureImage,
               groupName: object.groupName,
+              visible: object.visible,
             ),
         ],
         viewports: [
@@ -383,6 +508,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         visibleViewportCount: _visibleViewportCount,
         activeViewportIndex: _activeViewportIndex,
         activeObjectIndex: _activeObjectIndex,
+        selectedMeshIndices: Set.of(_selectedMeshIndices),
         mode: _mode,
         page: _page,
         tool: _tool,
@@ -412,6 +538,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
               texturePath: object.texturePath,
               textureImage: object.textureImage,
               groupName: object.groupName,
+              visible: object.visible,
             ),
         ]);
       for (var index = 0; index < _viewports.length; index++) {
@@ -427,6 +554,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _visibleViewportCount = snapshot.visibleViewportCount;
       _activeViewportIndex = snapshot.activeViewportIndex;
       _activeObjectIndex = snapshot.activeObjectIndex;
+      _selectedMeshIndices
+        ..clear()
+        ..addAll(snapshot.selectedMeshIndices);
       _mode = snapshot.mode;
       _page = snapshot.page;
       _tool = snapshot.tool;
@@ -1078,6 +1208,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
       return KeyEventResult.handled;
     }
     if (HardwareKeyboard.instance.isControlPressed) {
+      if (key == LogicalKeyboardKey.keyJ) {
+        _joinSelectedMeshes();
+        return KeyEventResult.handled;
+      }
       if (key == LogicalKeyboardKey.keyS) {
         if (HardwareKeyboard.instance.isShiftPressed) {
           _saveScene(saveAs: true);
@@ -1234,6 +1368,15 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   void _toggleSelectAll() {
     setState(() {
+      final visibleMeshes = [
+        for (var index = 0; index < _objects.length; index++)
+          if (_objects[index].visible) index,
+      ];
+      final allVisibleMeshesSelected = visibleMeshes.isNotEmpty &&
+          visibleMeshes.every(_selectedMeshIndices.contains);
+      _selectedMeshIndices
+        ..clear()
+        ..addAll(allVisibleMeshesSelected ? const <int>[] : visibleMeshes);
       var selectingAll = true;
       if (_mode == EditMode.vertex) {
         if (_selectedVertices.length == _mesh.vertices.length) {
@@ -1297,6 +1440,45 @@ class _ModelerScreenState extends State<ModelerScreen> {
     });
   }
 
+  void _joinSelectedVertices() {
+    if (_mode != EditMode.vertex || _selectedVertices.length != 2) {
+      _showMessage('Select exactly two vertices to join.');
+      return;
+    }
+    final selection = _selectedVertices.toList()..sort();
+    _recordUndo();
+    if (!_mesh.joinVertices(selection)) {
+      _undoHistory.removeLast();
+      _showMessage('Those vertices could not be joined.');
+      return;
+    }
+    setState(() {
+      _selectedVertices
+        ..clear()
+        ..add(selection.first);
+      _selectedFaces.clear();
+      _selectedFace = _mesh.faces.isEmpty ? null : 0;
+      _isDirty = true;
+    });
+  }
+
+  void _flipSelectedFaceNormals() {
+    final facesToFlip = _selectedFaces.isNotEmpty
+        ? _selectedFaces
+        : (_selectedFace == null ? const <int>{} : {_selectedFace!});
+    if (_mode != EditMode.face || facesToFlip.isEmpty) {
+      _showMessage('Select at least one face to flip its normal.');
+      return;
+    }
+    _recordUndo();
+    if (!_mesh.flipFaceNormals(facesToFlip)) {
+      _undoHistory.removeLast();
+      _showMessage('Could not flip the selected face normals.');
+      return;
+    }
+    setState(() => _isDirty = true);
+  }
+
   Future<void> _loadReferenceImage() async {
     final file = await openFile(
       acceptedTypeGroups: [
@@ -1347,6 +1529,173 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _tool = ActiveTool.select;
       _isDirty = true;
     });
+  }
+
+  void _createTriangle() {
+    _recordUndo();
+    if (!_mesh.addTriangle(_selectedVertices)) {
+      _undoHistory.removeLast();
+      _showMessage('Select three distinct vertices to make a triangle.');
+      return;
+    }
+    setState(() {
+      _selectedFace = _mesh.faces.length - 1;
+      _selectedFaces
+        ..clear()
+        ..add(_selectedFace!);
+      _mode = EditMode.face;
+      _tool = ActiveTool.select;
+      _isDirty = true;
+    });
+  }
+
+  Future<void> _finishFlatSurfaceDrag(
+    Rect selection,
+    Size size,
+    ViewportState viewport,
+  ) async {
+    if (selection.width < 6 || selection.height < 6) {
+      _showMessage('Drag a larger region to create a flat surface.');
+      return;
+    }
+    final result = await _showFlatSurfaceDialog();
+    if (result == null || !mounted) return;
+    final (name, horizontalSteps, verticalSteps) = result;
+    final surface = MeshModel.empty();
+    final corners = [
+      selection.topLeft,
+      selection.topRight,
+      selection.bottomRight,
+      selection.bottomLeft,
+    ].map((point) => _worldPosition(point, size, viewport)).toList();
+    if (!surface.addGridSurface(corners, horizontalSteps, verticalSteps)) {
+      _showMessage('Could not create a surface with those dimensions.');
+      return;
+    }
+
+    _recordUndo();
+    setState(() {
+      _objects.add(SceneObject(name, surface));
+      _activeObjectIndex = _objects.length - 1;
+      _selectedMeshIndices
+        ..clear()
+        ..add(_activeObjectIndex);
+      _selectedVertices.clear();
+      _selectedFaces
+        ..clear()
+        ..addAll(List.generate(surface.faces.length, (index) => index));
+      _selectedFace = surface.faces.isEmpty ? null : 0;
+      _mode = EditMode.face;
+      _tool = ActiveTool.select;
+      _surfaceSelectionStart = null;
+      _surfaceSelectionEnd = null;
+      _isDirty = true;
+    });
+  }
+
+  Future<(String, int, int)?> _showFlatSurfaceDialog() async {
+    var surfaceName = 'Surface';
+    var horizontalText = '2';
+    var verticalText = '2';
+    String? error;
+    final result = await showDialog<(String, int, int)>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Define flat surface'),
+          content: SizedBox(
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  autofocus: true,
+                  onChanged: (value) => surfaceName = value,
+                  decoration: const InputDecoration(
+                    labelText: 'Object name',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        onChanged: (value) => horizontalText = value,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Horizontal faces',
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        onChanged: (value) => verticalText = value,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Vertical faces',
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    error!,
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final name = surfaceName.trim();
+                final horizontal = int.tryParse(horizontalText);
+                final vertical = int.tryParse(verticalText);
+                if (name.isEmpty) {
+                  setDialogState(() => error = 'Enter an object name.');
+                  return;
+                }
+                if (_objects.any(
+                  (object) => object.name.toLowerCase() == name.toLowerCase(),
+                )) {
+                  setDialogState(
+                    () => error = 'An object with that name already exists.',
+                  );
+                  return;
+                }
+                if (horizontal == null ||
+                    vertical == null ||
+                    horizontal < 1 ||
+                    vertical < 1 ||
+                    horizontal > 64 ||
+                    vertical > 64) {
+                  setDialogState(
+                    () => error = 'Face counts must be between 1 and 64.',
+                  );
+                  return;
+                }
+                Navigator.pop(context, (name, horizontal, vertical));
+              },
+              child: const Text('Create'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result;
   }
 
   void _mergeSelectedTriangles() {
@@ -1561,17 +1910,31 @@ class _ModelerScreenState extends State<ModelerScreen> {
     );
     if (confirmed != true) return;
     if (index >= _objects.length || !identical(_objects[index], object)) return;
+    final selectedBeforeDelete = _selectedMeshIndices.toList();
     _recordUndo();
     setState(() {
       if (_objects.length == 1) {
         _objects[0] = SceneObject('Mesh_1', MeshModel.empty());
+        _selectedMeshIndices
+          ..clear()
+          ..add(0);
       } else {
         _objects.removeAt(index);
+        _selectedMeshIndices
+          ..clear()
+          ..addAll([
+            for (final selectedIndex in selectedBeforeDelete)
+              if (selectedIndex != index)
+                selectedIndex > index ? selectedIndex - 1 : selectedIndex,
+          ]);
         if (index < _activeObjectIndex) {
           _activeObjectIndex--;
         } else if (index == _activeObjectIndex) {
           _activeObjectIndex =
               math.min(_activeObjectIndex, _objects.length - 1);
+        }
+        if (_selectedMeshIndices.isEmpty) {
+          _selectedMeshIndices.add(_activeObjectIndex);
         }
       }
       _selectedVertices.clear();
@@ -1662,6 +2025,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
         ),
       );
       _activeObjectIndex = _objects.length - 1;
+      _selectedMeshIndices
+        ..clear()
+        ..add(_activeObjectIndex);
       _selectedVertices.clear();
       _selectedFaces.clear();
       _selectedFace = mesh.faces.isEmpty ? null : 0;
@@ -1744,6 +2110,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
     Size size,
     ViewportState viewport,
   ) {
+    if (_tool == ActiveTool.addSurface) return;
     if (_tool == ActiveTool.strip && _mode == EditMode.vertex) {
       _addStripPoint(point, size, viewport);
       return;
@@ -1833,6 +2200,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   void _fitScene(Size size, ViewportState viewport, int viewportIndex) {
     final points = _objects
+        .where((object) => object.visible)
         .expand((object) => object.mesh.vertices)
         .map((vertex) => vertex.position)
         .toList();
@@ -2002,6 +2370,14 @@ class _ModelerScreenState extends State<ModelerScreen> {
       setState(() {
         _objects.addAll(loadedObjects);
         _activeObjectIndex = _objects.length - loadedObjects.length;
+        _selectedMeshIndices
+          ..clear()
+          ..addAll(
+            List.generate(
+              loadedObjects.length,
+              (index) => _activeObjectIndex + index,
+            ),
+          );
         _selectedVertices.clear();
         _selectedFaces.clear();
         _selectedFace = _mesh.faces.isEmpty ? null : 0;
@@ -2059,6 +2435,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
           _objects.add(SceneObject('Mesh_1', MeshModel.empty()));
         }
         _activeObjectIndex = 0;
+        _selectedMeshIndices
+          ..clear()
+          ..add(0);
         _selectedVertices.clear();
         _selectedFaces.clear();
         _selectedFace = _mesh.faces.isEmpty ? null : 0;
@@ -2117,6 +2496,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
         ..clear()
         ..add(SceneObject('Mesh_1', MeshModel.starterPlane()));
       _activeObjectIndex = 0;
+      _selectedMeshIndices
+        ..clear()
+        ..add(0);
       _selectedVertices.clear();
       _selectedFaces.clear();
       _selectedFace = 0;
@@ -2267,9 +2649,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
           automaticallyImplyLeading: false,
           title: LayoutBuilder(
             builder: (context, constraints) {
-              final fillWidth = constraints.maxWidth >= 700;
               final menuRow = Row(
-                mainAxisSize: fillWidth ? MainAxisSize.max : MainAxisSize.min,
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   _dropMenu(
                     'File',
@@ -2455,7 +2836,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       if (value == 'about') _showAbout();
                     },
                   ),
-                  if (fillWidth) const Spacer() else const SizedBox(width: 4),
+                  const SizedBox(width: 4),
                   const SizedBox(width: 5),
                   Container(
                     height: 24,
@@ -2485,11 +2866,19 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     ),
                 ],
               );
-              return SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: fillWidth
-                    ? SizedBox(width: constraints.maxWidth, child: menuRow)
-                    : menuRow,
+              return SizedBox(
+                width: constraints.maxWidth,
+                child: DecoratedBox(
+                  key: const ValueKey('menuBarBorder'),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: const Color(0xFF48505E)),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: menuRow,
+                  ),
+                ),
               );
             },
           ),
@@ -2596,8 +2985,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
     const shortcuts = <(String, String)>[
       (
         'A',
-        'Select all vertices/faces in the active mode; press again to clear.'
+        'Select all visible meshes and vertices/faces in the active mode; '
+            'press again to clear.'
       ),
+      ('Ctrl+J', 'Join the selected visible meshes into one named mesh.'),
       ('B', 'Start box selection in the Model or UV editor.'),
       ('Delete / Backspace', 'Delete selected vertices or faces.'),
       ('M', 'Toggle constrained move on the selected X/Y/Z axis.'),
@@ -2696,9 +3087,15 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   Widget _buildCompactEditorTools() {
-    final enabled = _mode == EditMode.vertex
+    final canMakeQuad = _mode == EditMode.vertex
         ? _selectedVertices.length == 4
         : _selectedFaces.length == 2;
+    final canMakeTriangle =
+        _mode == EditMode.vertex && _selectedVertices.length == 3;
+    final canJoinVertices =
+        _mode == EditMode.vertex && _selectedVertices.length == 2;
+    final canFlipNormals = _mode == EditMode.face &&
+        (_selectedFaces.isNotEmpty || _selectedFace != null);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2751,6 +3148,18 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   }),
         ),
         _compactTool(
+          label: 'Add flat face',
+          icon: Icons.grid_4x4_rounded,
+          selected: _tool == ActiveTool.addSurface,
+          onPressed: () => setState(() {
+            _tool = _tool == ActiveTool.addSurface
+                ? ActiveTool.select
+                : ActiveTool.addSurface;
+            _surfaceSelectionStart = null;
+            _surfaceSelectionEnd = null;
+          }),
+        ),
+        _compactTool(
           label: _tool == ActiveTool.strip ? 'Stop strip' : 'Strip',
           icon: Icons.linear_scale_rounded,
           selected: _tool == ActiveTool.strip,
@@ -2760,11 +3169,27 @@ class _ModelerScreenState extends State<ModelerScreen> {
           label:
               _mode == EditMode.face ? 'Merge triangles to quad' : 'Make quad',
           icon: Icons.change_history_rounded,
-          onPressed: !enabled
+          onPressed: !canMakeQuad
               ? null
               : _mode == EditMode.face
                   ? _mergeSelectedTriangles
                   : _connectVertices,
+        ),
+        if (_mode == EditMode.vertex)
+          _compactTool(
+            label: 'Make triangle',
+            icon: Icons.change_history_outlined,
+            onPressed: canMakeTriangle ? _createTriangle : null,
+          ),
+        _compactTool(
+          label: 'Join vertices',
+          icon: Icons.merge_type_rounded,
+          onPressed: canJoinVertices ? _joinSelectedVertices : null,
+        ),
+        _compactTool(
+          label: 'Flip normals',
+          icon: Icons.flip_rounded,
+          onPressed: canFlipNormals ? _flipSelectedFaceNormals : null,
         ),
         _compactTool(
           label: 'Move on ${_selectedAxis.name.toUpperCase()} (M)',
@@ -3062,6 +3487,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       }
                       final object = _objects[meshIndex];
                       final active = meshIndex == _activeObjectIndex;
+                      final selected = _selectedMeshIndices.contains(meshIndex);
+                      final objectVisible = object.visible;
                       final vertexCount = object.mesh.vertices.length;
                       final faceCount = object.mesh.faces.length;
                       return Padding(
@@ -3085,8 +3512,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
                               visualDensity: VisualDensity.compact,
                               contentPadding:
                                   const EdgeInsets.symmetric(horizontal: 8),
-                              selected: active,
-                              selectedTileColor: const Color(0xFF283955),
+                              selected: selected,
+                              selectedTileColor: active
+                                  ? const Color(0xFF283955)
+                                  : const Color(0xFF222A37),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8),
                               ),
@@ -3098,7 +3527,33 @@ class _ModelerScreenState extends State<ModelerScreen> {
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(fontSize: 12),
                               ),
-                              onTap: () => _selectMesh(meshIndex),
+                              trailing: IconButton(
+                                tooltip: objectVisible
+                                    ? 'Hide ${object.name}'
+                                    : 'Show ${object.name}',
+                                visualDensity: VisualDensity.compact,
+                                constraints: const BoxConstraints.tightFor(
+                                  width: 30,
+                                  height: 30,
+                                ),
+                                padding: EdgeInsets.zero,
+                                onPressed: () =>
+                                    _toggleMeshVisibility(meshIndex),
+                                icon: Icon(
+                                  objectVisible
+                                      ? Icons.visibility_outlined
+                                      : Icons.visibility_off_outlined,
+                                  size: 18,
+                                  color: objectVisible
+                                      ? Colors.white70
+                                      : Colors.white38,
+                                ),
+                              ),
+                              onTap: () => _selectMesh(
+                                meshIndex,
+                                toggle:
+                                    HardwareKeyboard.instance.isControlPressed,
+                              ),
                             ),
                           ),
                         ),
@@ -3224,7 +3679,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         builder: (context, constraints) {
           final size = Size(constraints.maxWidth, constraints.maxHeight);
           return MouseRegion(
-            cursor: _boxSelectActive
+            cursor: _boxSelectActive || _tool == ActiveTool.addSurface
                 ? SystemMouseCursors.precise
                 : SystemMouseCursors.basic,
             child: Listener(
@@ -3268,7 +3723,13 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   _activeViewportIndex = viewportIndex;
                   _gestureAnchor = details.focalPoint;
                   _gestureZoomStart = viewport.zoom;
-                  if (_boxSelectActive) {
+                  if (_tool == ActiveTool.addSurface &&
+                      details.pointerCount == 1) {
+                    setState(() {
+                      _surfaceSelectionStart = details.localFocalPoint;
+                      _surfaceSelectionEnd = details.localFocalPoint;
+                    });
+                  } else if (_boxSelectActive) {
                     _boxSelectionStart = details.localFocalPoint;
                     _boxSelectionEnd = details.localFocalPoint;
                   } else if (_scaleActive) {
@@ -3278,7 +3739,13 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   }
                 },
                 onScaleUpdate: (details) {
-                  if (_boxSelectActive) {
+                  if (_tool == ActiveTool.addSurface &&
+                      details.pointerCount == 1 &&
+                      _surfaceSelectionStart != null) {
+                    setState(
+                      () => _surfaceSelectionEnd = details.localFocalPoint,
+                    );
+                  } else if (_boxSelectActive) {
                     setState(() => _boxSelectionEnd = details.localFocalPoint);
                   } else if (_scaleActive) {
                     final start = _scaleStartPointer;
@@ -3303,6 +3770,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       viewport,
                     );
                   } else if (_tool != ActiveTool.addVertex &&
+                      _tool != ActiveTool.addSurface &&
                       _tool != ActiveTool.strip &&
                       _tool != ActiveTool.move) {
                     setState(() {
@@ -3316,7 +3784,19 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   }
                 },
                 onScaleEnd: (_) {
-                  if (_boxSelectActive) {
+                  if (_surfaceSelectionStart != null) {
+                    final start = _surfaceSelectionStart!;
+                    final end = _surfaceSelectionEnd ?? start;
+                    setState(() {
+                      _surfaceSelectionStart = null;
+                      _surfaceSelectionEnd = null;
+                    });
+                    _finishFlatSurfaceDrag(
+                      Rect.fromPoints(start, end),
+                      size,
+                      viewport,
+                    );
+                  } else if (_boxSelectActive) {
                     final start = _boxSelectionStart;
                     final end = _boxSelectionEnd;
                     if (start != null && end != null) {
@@ -3339,6 +3819,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     CustomPaint(
                       painter: _ViewportPainter(
                         meshes: _objects.map((object) => object.mesh).toList(),
+                        visibleMeshes: [
+                          for (final object in _objects) object.visible,
+                        ],
                         textures: _objects
                             .map((object) => object.textureImage)
                             .toList(),
@@ -3350,13 +3833,19 @@ class _ModelerScreenState extends State<ModelerScreen> {
                         basis: _viewBasis(viewport),
                         viewPreset: viewport.preset,
                         referenceImage: _referenceImages[viewportIndex],
-                        selectionRect: _boxSelectionStart == null ||
-                                _boxSelectionEnd == null
-                            ? null
-                            : Rect.fromPoints(
-                                _boxSelectionStart!,
-                                _boxSelectionEnd!,
-                              ),
+                        selectionRect: _surfaceSelectionStart != null &&
+                                _surfaceSelectionEnd != null
+                            ? Rect.fromPoints(
+                                _surfaceSelectionStart!,
+                                _surfaceSelectionEnd!,
+                              )
+                            : _boxSelectionStart == null ||
+                                    _boxSelectionEnd == null
+                                ? null
+                                : Rect.fromPoints(
+                                    _boxSelectionStart!,
+                                    _boxSelectionEnd!,
+                                  ),
                         referenceOpacity: _referenceOpacity,
                         viewStyle: _viewStyle,
                         fade:
@@ -3649,6 +4138,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
     if (_tool == ActiveTool.addVertex) {
       return 'Tap the surface to place a vertex';
     }
+    if (_tool == ActiveTool.addSurface) {
+      return 'Drag a region to add a flat face';
+    }
     if (_tool == ActiveTool.strip) {
       return switch (_stripEdge.length) {
         0 => 'Strip: place two starting vertices',
@@ -3711,6 +4203,7 @@ class _BottomNavButton extends StatelessWidget {
 class _ViewportPainter extends CustomPainter {
   _ViewportPainter({
     required this.meshes,
+    required this.visibleMeshes,
     required this.textures,
     required this.activeMeshIndex,
     required this.selectedVertices,
@@ -3728,6 +4221,7 @@ class _ViewportPainter extends CustomPainter {
   });
 
   final List<MeshModel> meshes;
+  final List<bool> visibleMeshes;
   final List<ui.Image?> textures;
   final int activeMeshIndex;
   final Set<int> selectedVertices;
@@ -3826,6 +4320,7 @@ class _ViewportPainter extends CustomPainter {
       ..style = PaintingStyle.stroke;
     final faceDraws = <(double, int, int, MeshFace)>[];
     for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
+      if (!visibleMeshes[meshIndex]) continue;
       final mesh = meshes[meshIndex];
       for (var faceIndex = 0; faceIndex < mesh.faces.length; faceIndex++) {
         final face = mesh.faces[faceIndex];
@@ -3888,6 +4383,7 @@ class _ViewportPainter extends CustomPainter {
 
     if (showVertices) {
       for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
+        if (!visibleMeshes[meshIndex]) continue;
         final mesh = meshes[meshIndex];
         for (var index = 0; index < mesh.vertices.length; index++) {
           final point = project(mesh.vertices[index].position);
@@ -3907,7 +4403,8 @@ class _ViewportPainter extends CustomPainter {
       }
     }
 
-    if (meshes[activeMeshIndex].vertices.isEmpty) {
+    if (!List.generate(meshes.length, (index) => index).any(
+        (index) => visibleMeshes[index] && meshes[index].vertices.isNotEmpty)) {
       _drawText(
         canvas,
         'Add vertices or reset the active mesh to start',

@@ -38,6 +38,23 @@ class MeshModel {
         meshFaces.toList(),
       );
 
+  factory MeshModel.join(Iterable<MeshModel> meshes) {
+    final joined = MeshModel.empty();
+    for (final mesh in meshes) {
+      final offset = joined.vertices.length;
+      joined.vertices.addAll(mesh.vertices);
+      joined.faces.addAll(
+        mesh.faces.map(
+          (face) => MeshFace(
+            face.vertices.map((index) => index + offset).toList(),
+            face.uv,
+          ),
+        ),
+      );
+    }
+    return joined;
+  }
+
   factory MeshModel.starterPlane() {
     final mesh = MeshModel.empty();
     mesh.vertices.addAll([
@@ -67,6 +84,66 @@ class MeshModel {
     vertices.add(MeshVertex(position));
     return vertices.length - 1;
   }
+
+  bool addGridSurface(
+    List<Vec3> corners,
+    int horizontalSteps,
+    int verticalSteps,
+  ) {
+    if (corners.length != 4 ||
+        horizontalSteps < 1 ||
+        horizontalSteps > 64 ||
+        verticalSteps < 1 ||
+        verticalSteps > 64) {
+      return false;
+    }
+
+    final firstVertex = vertices.length;
+    final columns = horizontalSteps + 1;
+    for (var row = 0; row <= verticalSteps; row++) {
+      final vertical = row / verticalSteps;
+      for (var column = 0; column <= horizontalSteps; column++) {
+        final horizontal = column / horizontalSteps;
+        final top = _interpolate(corners[0], corners[1], horizontal);
+        final bottom = _interpolate(corners[3], corners[2], horizontal);
+        vertices.add(
+          MeshVertex(_interpolate(top, bottom, vertical)),
+        );
+      }
+    }
+
+    final uvByVertex = <int, Offset>{
+      for (var row = 0; row <= verticalSteps; row++)
+        for (var column = 0; column <= horizontalSteps; column++)
+          firstVertex + row * columns + column: Offset(
+            column / horizontalSteps,
+            1 - row / verticalSteps,
+          ),
+    };
+    final firstFace = faces.length;
+    for (var row = 0; row < verticalSteps; row++) {
+      for (var column = 0; column < horizontalSteps; column++) {
+        final topLeft = firstVertex + row * columns + column;
+        final topRight = topLeft + 1;
+        final bottomLeft = topLeft + columns;
+        final bottomRight = bottomLeft + 1;
+        if (!addQuad([topLeft, topRight, bottomRight, bottomLeft])) {
+          faces.removeRange(firstFace, faces.length);
+          vertices.removeRange(firstVertex, vertices.length);
+          return false;
+        }
+        final face = faces.last;
+        face.uv.setAll(0, face.vertices.map((index) => uvByVertex[index]!));
+      }
+    }
+    return true;
+  }
+
+  Vec3 _interpolate(Vec3 first, Vec3 second, double amount) => Vec3(
+        first.x + (second.x - first.x) * amount,
+        first.y + (second.y - first.y) * amount,
+        first.z + (second.z - first.z) * amount,
+      );
 
   List<int> duplicateVertices(Iterable<int> selectedVertices) {
     final selection = selectedVertices.toSet().toList()..sort();
@@ -149,6 +226,71 @@ class MeshModel {
         const [Offset(0.08, 0.08), Offset(0.92, 0.08), Offset(0.5, 0.92)],
       ),
     );
+    return true;
+  }
+
+  bool joinVertices(Iterable<int> selectedVertices) {
+    final selection = selectedVertices.toSet().toList()..sort();
+    if (selection.length != 2 ||
+        selection.any((index) => index < 0 || index >= vertices.length)) {
+      return false;
+    }
+
+    final keep = selection.first;
+    final remove = selection.last;
+    final first = vertices[keep].position;
+    final second = vertices[remove].position;
+    vertices[keep] = MeshVertex(
+      Vec3(
+        (first.x + second.x) / 2,
+        (first.y + second.y) / 2,
+        (first.z + second.z) / 2,
+      ),
+    );
+
+    final remainingFaces = <MeshFace>[];
+    for (final face in faces) {
+      final faceVertices = <int>[];
+      final faceUvs = <Offset>[];
+      for (var corner = 0; corner < face.vertices.length; corner++) {
+        var index = face.vertices[corner];
+        if (index == remove) {
+          index = keep;
+        } else if (index > remove) {
+          index--;
+        }
+        if (faceVertices.isNotEmpty && faceVertices.last == index) continue;
+        faceVertices.add(index);
+        faceUvs.add(face.uv[corner]);
+      }
+      if (faceVertices.length > 1 && faceVertices.first == faceVertices.last) {
+        faceVertices.removeLast();
+        faceUvs.removeLast();
+      }
+      if (faceVertices.toSet().length >= 3) {
+        remainingFaces.add(MeshFace(faceVertices, faceUvs));
+      }
+    }
+    vertices.removeAt(remove);
+    faces
+      ..clear()
+      ..addAll(remainingFaces);
+    return true;
+  }
+
+  bool flipFaceNormals(Iterable<int> selectedFaces) {
+    final selection = selectedFaces.toSet();
+    if (selection.isEmpty ||
+        selection.any((index) => index < 0 || index >= faces.length)) {
+      return false;
+    }
+    for (final index in selection) {
+      final face = faces[index];
+      faces[index] = MeshFace(
+        face.vertices.reversed.toList(),
+        face.uv.reversed.toList(),
+      );
+    }
     return true;
   }
 

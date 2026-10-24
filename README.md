@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.05** — Windows-first polygon modeling MVP.
+**Version 1.06** — Windows-first polygon modeling MVP.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
@@ -54,6 +54,10 @@ flutter test
 - Right-click a mesh in the panel (or long-press it on touch devices) to rename
   it, create an independent copy, or delete it. Imported OBJ parts appear
   beneath a collapsible group named after the OBJ file.
+- Meshes are visible by default. Use each row's eye button to hide or show that
+  mesh. Click a row to activate it; Ctrl-click rows to select multiple meshes,
+  or press **A** to select all visible meshes. Press **Ctrl+J** to join the
+  selected visible meshes and give the result a name.
 - **Reset active mesh** replaces only the selected mesh with a flat quad.
 - In **Vertex** mode, tap the visible vertices to select them. Choose **Add
   vertex** once, then tap the viewport repeatedly to place vertices on the
@@ -61,6 +65,15 @@ flutter test
   Front and side views place vertices on vertical planes; Top places them on
   the horizontal plane.
 - Select four vertices and choose **Make quad** to connect them into a face.
+- Select three vertices and choose **Make triangle** to create a triangular
+  face.
+- Select two vertices and choose **Join vertices** to merge them at their
+  midpoint; faces collapsed below three corners are removed. In Face mode,
+  select one or more faces and choose **Flip normals** to reverse their
+  winding while keeping their UVs aligned.
+- Choose **Add flat surface**, drag a rectangle in the viewport, then enter an
+  object name and horizontal/vertical face counts. Blunder creates a separate
+  gridded surface in the active view plane; each direction supports 1–64 faces.
 - Use **Strip** to place a pair of starting vertices and then add successive
   vertices; each new point creates a triangle connected to the last edge.
 - In **Face** mode, click two adjacent triangles and choose **Triangles → quad**

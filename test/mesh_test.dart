@@ -12,6 +12,48 @@ void main() {
       expect(mesh.faces.single.uv, hasLength(4));
     });
 
+    test('creates a flat grid surface with continuous UV coordinates', () {
+      final mesh = MeshModel.empty();
+
+      expect(
+        mesh.addGridSurface(
+          const [
+            Vec3(-2, 2, 0),
+            Vec3(2, 2, 0),
+            Vec3(2, -2, 0),
+            Vec3(-2, -2, 0),
+          ],
+          3,
+          2,
+        ),
+        isTrue,
+      );
+      expect(mesh.vertices, hasLength(12));
+      expect(mesh.faces, hasLength(6));
+      expect(mesh.faces.every((face) => face.vertices.length == 4), isTrue);
+      expect(
+        mesh.faces.expand((face) => face.uv).toSet(),
+        containsAll([
+          const Offset(0, 1),
+          const Offset(1 / 3, 0.5),
+          const Offset(1, 0),
+        ]),
+      );
+      expect(
+        mesh.addGridSurface(
+          const [
+            Vec3(0, 0, 0),
+            Vec3(1, 0, 0),
+            Vec3(1, 1, 0),
+            Vec3(0, 1, 0),
+          ],
+          0,
+          2,
+        ),
+        isFalse,
+      );
+    });
+
     test('connects four selected vertices into a quad', () {
       final mesh = MeshModel.empty()
         ..addVertex(const Vec3(-1, -1, 0))
@@ -45,6 +87,66 @@ void main() {
       expect(mesh.faces.single.vertices, hasLength(4));
       expect(mesh.faces.single.vertices.toSet(), {0, 1, 2, 3});
       expect(mesh.faces.single.uv, hasLength(4));
+    });
+
+    test('joins two vertices and removes collapsed faces', () {
+      final mesh = MeshModel.fromData(
+        const [
+          Vec3(0, 0, 0),
+          Vec3(1, 0, 0),
+          Vec3(1, 1, 0),
+          Vec3(0, 1, 0),
+          Vec3(-1, 0, 0),
+        ],
+        [
+          MeshFace(
+            [0, 1, 2, 3],
+            const [
+              Offset(0, 0),
+              Offset(1, 0),
+              Offset(1, 1),
+              Offset(0, 1),
+            ],
+          ),
+          MeshFace(
+            [0, 4, 1],
+            const [Offset.zero, Offset(0.5, 0.5), Offset(1, 0)],
+          ),
+        ],
+      );
+
+      expect(mesh.joinVertices([0, 1]), isTrue);
+      expect(mesh.vertices, hasLength(4));
+      expect(mesh.vertices.first.position.x, closeTo(0.5, 1e-9));
+      expect(mesh.faces, hasLength(1));
+      expect(mesh.faces.single.vertices, [0, 1, 2]);
+      expect(mesh.faces.single.uv,
+          [const Offset(0, 0), const Offset(1, 1), const Offset(0, 1)]);
+      expect(mesh.joinVertices([0, 0]), isFalse);
+    });
+
+    test('flips selected face winding without changing its UV mapping', () {
+      final mesh = MeshModel.starterPlane();
+      final originalUvs = mesh.faces.single.uv.toList();
+
+      expect(mesh.flipFaceNormals([0]), isTrue);
+      expect(mesh.faces.single.vertices, [3, 2, 1, 0]);
+      expect(mesh.faces.single.uv, originalUvs.reversed);
+      expect(mesh.flipFaceNormals([1]), isFalse);
+    });
+
+    test('joins mesh geometry while preserving face UVs', () {
+      final first = MeshModel.starterPlane();
+      final second = MeshModel.starterPlane()
+        ..moveVertices([0, 1, 2, 3], const Vec3(3, 0, 0));
+
+      final joined = MeshModel.join([first, second]);
+
+      expect(joined.vertices, hasLength(8));
+      expect(joined.faces, hasLength(2));
+      expect(joined.faces[1].vertices, [4, 5, 6, 7]);
+      expect(joined.faces[1].uv, second.faces.single.uv);
+      expect(joined.vertices[4].position.x, 2);
     });
 
     test('rotates a selection around its center and mirrors mesh winding', () {

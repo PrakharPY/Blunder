@@ -236,6 +236,124 @@ void main() {
     expect(find.text('Tap the surface to place a vertex'), findsOneWidget);
   });
 
+  testWidgets('adds a named flat grid surface after dragging a region',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    expect(find.byKey(const ValueKey('menuBarBorder')), findsOneWidget);
+    await tester.tap(find.byTooltip('Add flat face'));
+    await tester.pumpAndSettle();
+    expect(find.text('Drag a region to add a flat face'), findsOneWidget);
+
+    final viewport =
+        tester.getRect(find.byKey(const ValueKey('modelViewport')));
+    await tester.dragFrom(
+      viewport.center + const Offset(-80, -60),
+      const Offset(160, 120),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Define flat surface'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField).at(0), 'Grid');
+    await tester.enterText(find.byType(TextField).at(1), '3');
+    await tester.enterText(find.byType(TextField).at(2), '2');
+    await tester.tap(find.text('Create'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Grid · 12 vertices · 6 faces'), findsOneWidget);
+  });
+
+  testWidgets('creates a triangle from three selected vertices',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Add mesh').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Add vertex'));
+    await tester.pumpAndSettle();
+    final viewport =
+        tester.getRect(find.byKey(const ValueKey('modelViewport')));
+    for (final offset in const [
+      Offset(-40, -25),
+      Offset(40, -25),
+      Offset(0, 35),
+    ]) {
+      await tester.tapAt(viewport.center + offset);
+      await tester.pumpAndSettle();
+    }
+    expect(find.textContaining('7 vertices · 1 face'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Make triangle'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('7 vertices · 2 faces'), findsOneWidget);
+  });
+
+  testWidgets('joins two selected vertices from the toolbar', (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Add mesh').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Add vertex'));
+    await tester.pumpAndSettle();
+    final viewport =
+        tester.getRect(find.byKey(const ValueKey('modelViewport')));
+    await tester.tapAt(viewport.center + const Offset(-70, -20));
+    await tester.pumpAndSettle();
+    await tester.tapAt(viewport.center + const Offset(70, 20));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('6 vertices · 1 face'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Join vertices'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('5 vertices · 1 face'), findsOneWidget);
+  });
+
+  testWidgets('hides meshes and joins all visible meshes with Ctrl+J',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Add mesh').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Mesh_2 · 4 vertices · 1 face'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Hide Mesh_2'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Show Mesh_2'), findsOneWidget);
+    await tester.tap(find.byTooltip('Show Mesh_2'));
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyJ);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.text('Join meshes'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).last, 'Combined');
+    await tester.tap(find.text('Join'));
+    await tester.pumpAndSettle();
+
+    expect(
+        find.textContaining('Combined · 8 vertices · 2 faces'), findsOneWidget);
+    expect(find.textContaining('Mesh_1 · 4 vertices · 1 face'), findsNothing);
+    expect(find.textContaining('Mesh_2 · 4 vertices · 1 face'), findsNothing);
+  });
+
   testWidgets('has visible zoom controls and a dirty-scene prompt',
       (tester) async {
     tester.view.physicalSize = const Size(1100, 800);
@@ -444,7 +562,8 @@ void main() {
     await tester.tap(find.text('Shortcut Keys'));
     await tester.pumpAndSettle();
     expect(find.text('Shortcut Keys'), findsOneWidget);
-    expect(find.textContaining('Select all vertices/faces'), findsOneWidget);
+    expect(find.textContaining('Select all visible meshes'), findsOneWidget);
+    expect(find.textContaining('Ctrl+J'), findsOneWidget);
     await tester.tap(find.text('Close'));
     await tester.pumpAndSettle();
 
@@ -452,7 +571,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('About Blunder'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Blunder v1.05'), findsOneWidget);
+    expect(find.textContaining('Blunder v1.06'), findsOneWidget);
     expect(find.textContaining('Prakhar Kumar Yadav'), findsOneWidget);
     expect(find.textContaining('GitHub Copilot'), findsOneWidget);
   });
