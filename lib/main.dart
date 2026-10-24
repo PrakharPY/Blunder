@@ -11,6 +11,8 @@ import 'package:flutter/services.dart';
 import 'mesh.dart';
 import 'model_io.dart';
 
+const String _appVersion = '1.05';
+
 void main(List<String> args) {
   String? initialPkyPath;
   for (final argument in args) {
@@ -31,7 +33,7 @@ class BlunderApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Blunder',
+      title: 'Blunder v$_appVersion',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -233,8 +235,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
   String? _currentFilePath;
   bool _isDirty = false;
   bool _isSaving = false;
-  bool _awaitingRotationAxis = false;
   MeshAxis? _rotationAxis;
+  MeshAxis _selectedAxis = MeshAxis.x;
   String _rotationDegrees = '';
   final List<_EditorSnapshot> _undoHistory = [];
   final List<_EditorSnapshot> _redoHistory = [];
@@ -557,14 +559,22 @@ class _ModelerScreenState extends State<ModelerScreen> {
   void _toggleMoveTool() {
     setState(() {
       _tool = _tool == ActiveTool.move ? ActiveTool.select : ActiveTool.move;
-      _lockedAxis = null;
+      _lockedAxis = _tool == ActiveTool.move ? _selectedAxis : null;
     });
   }
 
-  void _lockAxis(MeshAxis axis) {
+  void _selectAxis(MeshAxis axis) {
+    setState(() {
+      _selectedAxis = axis;
+      if (_tool == ActiveTool.move) _lockedAxis = axis;
+      if (_rotationAxis != null) _rotationAxis = axis;
+    });
+  }
+
+  void _startMovingOnSelectedAxis() {
     setState(() {
       _tool = ActiveTool.move;
-      _lockedAxis = axis;
+      _lockedAxis = _selectedAxis;
     });
   }
 
@@ -581,7 +591,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ..clear()
           ..addAll(duplicated);
         _tool = ActiveTool.move;
-        _lockedAxis = null;
+        _lockedAxis = _selectedAxis;
         _isDirty = true;
       });
       return;
@@ -603,7 +613,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ..clear()
           ..addAll(duplicatedFaces);
         _tool = ActiveTool.move;
-        _lockedAxis = null;
+        _lockedAxis = _selectedAxis;
         _isDirty = true;
       });
       return;
@@ -1016,7 +1026,13 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _beginScale();
       return KeyEventResult.handled;
     }
-    if (_awaitingRotationAxis) {
+    if (_rotationAxis != null) {
+      if (key == LogicalKeyboardKey.escape) {
+        _rotationAxis = null;
+        _rotationDegrees = '';
+        setState(() {});
+        return KeyEventResult.handled;
+      }
       final axis = switch (key) {
         LogicalKeyboardKey.keyX => MeshAxis.x,
         LogicalKeyboardKey.keyY => MeshAxis.y,
@@ -1024,25 +1040,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
         _ => null,
       };
       if (axis != null) {
-        _awaitingRotationAxis = false;
-        _rotationAxis = axis;
-        _rotationDegrees = '';
-        setState(() {});
-        return KeyEventResult.handled;
-      }
-
-      if (key == LogicalKeyboardKey.escape) {
-        _awaitingRotationAxis = false;
-        setState(() {});
-        return KeyEventResult.handled;
-      }
-      return KeyEventResult.handled;
-    }
-    if (_rotationAxis != null) {
-      if (key == LogicalKeyboardKey.escape) {
-        _rotationAxis = null;
-        _rotationDegrees = '';
-        setState(() {});
+        setState(() {
+          _rotationAxis = axis;
+          _selectedAxis = axis;
+          _rotationDegrees = '';
+        });
         return KeyEventResult.handled;
       }
       if (key == LogicalKeyboardKey.enter ||
@@ -1102,8 +1104,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.keyR) {
-      _awaitingRotationAxis = true;
-      _showMessage('Press X, Y, or Z, type degrees, then press Enter.');
+      _rotationAxis = _selectedAxis;
+      _rotationDegrees = '';
+      _showMessage(
+        'Rotate ${_selectedAxis.name.toUpperCase()}: type degrees, then press Enter.',
+      );
       setState(() {});
       return KeyEventResult.handled;
     }
@@ -1112,23 +1117,15 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _duplicateIfRequested();
       return KeyEventResult.handled;
     }
-    if (key == LogicalKeyboardKey.keyX) {
-      if (_tool == ActiveTool.move) {
-        _lockAxis(MeshAxis.x);
-        return KeyEventResult.handled;
-      }
-    }
-    if (key == LogicalKeyboardKey.keyY) {
-      if (_tool == ActiveTool.move) {
-        _lockAxis(MeshAxis.y);
-        return KeyEventResult.handled;
-      }
-    }
-    if (key == LogicalKeyboardKey.keyZ) {
-      if (_tool == ActiveTool.move) {
-        _lockAxis(MeshAxis.z);
-        return KeyEventResult.handled;
-      }
+    if (key == LogicalKeyboardKey.keyX ||
+        key == LogicalKeyboardKey.keyY ||
+        key == LogicalKeyboardKey.keyZ) {
+      _selectAxis(switch (key) {
+        LogicalKeyboardKey.keyX => MeshAxis.x,
+        LogicalKeyboardKey.keyY => MeshAxis.y,
+        _ => MeshAxis.z,
+      });
+      return KeyEventResult.handled;
     }
     final view = switch (key) {
       LogicalKeyboardKey.numpad1 ||
@@ -1440,6 +1437,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   void _rotateSelection(MeshAxis axis, double degrees) {
+    if (!_verticesToRotate.isNotEmpty) {
+      _showMessage('Select vertices, a face, or a mesh to rotate.');
+      return;
+    }
+    _selectAxis(axis);
     _recordUndo();
     if (!_mesh.rotateVertices(
       _verticesToRotate,
@@ -1454,7 +1456,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   Future<void> _showRotateDialog() async {
     final degrees = TextEditingController(text: '90');
-    var axis = MeshAxis.x;
+    var axis = _selectedAxis;
     final result = await showDialog<(MeshAxis, double)>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -1700,17 +1702,6 @@ class _ModelerScreenState extends State<ModelerScreen> {
         await _duplicateMesh(index);
       case 'delete':
         await _deleteMeshAt(index);
-    }
-  }
-
-  void _deleteFace() {
-    if (_selectedFaces.isNotEmpty) {
-      _deleteSelection();
-    } else if (_selectedFace != null) {
-      _selectedFaces
-        ..clear()
-        ..add(_selectedFace!);
-      _deleteSelection();
     }
   }
 
@@ -2342,6 +2333,15 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     'Mesh',
                     const [
                       PopupMenuItem(value: 'newMesh', child: Text('New mesh')),
+                      PopupMenuItem(
+                        value: 'duplicate',
+                        child: Text('Duplicate selection  (Shift+D)'),
+                      ),
+                      PopupMenuItem(
+                        value: 'deleteSelection',
+                        child: Text('Delete selected elements  (Delete)'),
+                      ),
+                      PopupMenuDivider(),
                       PopupMenuItem(value: 'mirror', child: Text('Mirror…')),
                       PopupMenuItem(
                         value: 'rotate',
@@ -2357,6 +2357,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       switch (value) {
                         case 'newMesh':
                           _addMesh();
+                        case 'duplicate':
+                          _duplicateSelection();
+                        case 'deleteSelection':
+                          _deleteSelection();
                         case 'mirror':
                           _mirrorActiveMesh();
                         case 'rotate':
@@ -2434,8 +2438,32 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       }
                     },
                   ),
+                  _dropMenu(
+                    'Help',
+                    const [
+                      PopupMenuItem(
+                        value: 'shortcuts',
+                        child: Text('Shortcut Keys'),
+                      ),
+                      PopupMenuItem(
+                        value: 'about',
+                        child: Text('About Blunder'),
+                      ),
+                    ],
+                    (value) {
+                      if (value == 'shortcuts') _showShortcutHelp();
+                      if (value == 'about') _showAbout();
+                    },
+                  ),
                   if (fillWidth) const Spacer() else const SizedBox(width: 4),
                   const SizedBox(width: 5),
+                  Container(
+                    height: 24,
+                    width: 1,
+                    color: const Color(0xFF48505E),
+                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                  ),
+                  _buildAxisButtons(),
                   Container(
                     height: 24,
                     width: 1,
@@ -2497,16 +2525,30 @@ class _ModelerScreenState extends State<ModelerScreen> {
       } else if (entry is PopupMenuItem<String>) {
         final value = entry.value;
         menuChildren.add(
-          MenuItemButton(
-            onPressed: value == null
-                ? null
-                : () {
-                    controller.close();
-                    onSelected(value);
-                  },
-            child: DefaultTextStyle.merge(
-              style: const TextStyle(fontSize: 13),
-              child: entry.child ?? const SizedBox.shrink(),
+          Container(
+            margin: const EdgeInsets.only(bottom: 3),
+            decoration: BoxDecoration(
+              border: Border.all(color: const Color(0xFF48505E)),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: MenuItemButton(
+              style: const ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                minimumSize: WidgetStatePropertyAll(Size(0, 30)),
+                padding: WidgetStatePropertyAll(
+                  EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                ),
+              ),
+              onPressed: value == null
+                  ? null
+                  : () {
+                      controller.close();
+                      onSelected(value);
+                    },
+              child: DefaultTextStyle.merge(
+                style: const TextStyle(fontSize: 11),
+                child: entry.child ?? const SizedBox.shrink(),
+              ),
             ),
           ),
         );
@@ -2531,7 +2573,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
             visualDensity: VisualDensity.compact,
             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             minimumSize: const Size(0, 30),
-            padding: const EdgeInsets.symmetric(horizontal: 5),
+            padding: const EdgeInsets.symmetric(horizontal: 3),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -2543,15 +2585,112 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   fontSize: 12,
                 ),
               ),
-              Icon(
-                menuController.isOpen
-                    ? Icons.arrow_drop_up
-                    : Icons.arrow_drop_down,
-                size: 16,
-              ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _showShortcutHelp() {
+    const shortcuts = <(String, String)>[
+      (
+        'A',
+        'Select all vertices/faces in the active mode; press again to clear.'
+      ),
+      ('B', 'Start box selection in the Model or UV editor.'),
+      ('Delete / Backspace', 'Delete selected vertices or faces.'),
+      ('M', 'Toggle constrained move on the selected X/Y/Z axis.'),
+      (
+        'R',
+        'Enter a rotation angle around the selected axis; Enter applies it.'
+      ),
+      ('X / Y / Z', 'Select the axis for move, rotate, and duplicate.'),
+      (
+        'Shift+D',
+        'Duplicate selected vertices/faces and move on the selected axis.'
+      ),
+      (
+        'S',
+        'Scale the active mesh uniformly; type a factor or drag, then Enter.'
+      ),
+      ('Enter / Esc', 'Confirm or cancel the active scale/UV transform.'),
+      ('Ctrl+Z / Ctrl+Y', 'Undo / redo the last recorded action.'),
+      ('Ctrl+N / Ctrl+O', 'Create a scene / open a project.'),
+      ('Ctrl+S / Ctrl+Shift+S', 'Save / Save As.'),
+      ('Ctrl+E', 'Export the scene as Wavefront OBJ.'),
+      ('Numpad 1 / 3 / 7 / 9 / 5', 'Front / right / top / back / free view.'),
+      ('Numpad 2 / 4 / 6 / 8', 'Orbit the active viewport.'),
+      ('UV: B', 'Drag a rectangle to select UV corners.'),
+      ('UV: S', 'Move the selected UV corners by dragging.'),
+      ('UV: E, then X/Y', 'Stretch selected UVs along an axis.'),
+      ('UV: M, then X/Y', 'Mirror selected UVs along an axis.'),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Shortcut Keys'),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final (keys, description) in shortcuts)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 150,
+                          child: Text(
+                            keys,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF9FBEFF),
+                            ),
+                          ),
+                        ),
+                        Expanded(child: Text(description)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAbout() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('About Blunder'),
+        content: const SizedBox(
+          width: 380,
+          child: Text(
+            'Blunder v$_appVersion\n\n'
+            'A lightweight, beginner-friendly polygon modeler for building '
+            'and editing 3D meshes with vertices, faces, and UV mapping.\n\n'
+            'Created by - Prakhar Kumar Yadav\n'
+            'Built with assistance from GitHub Copilot.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
       ),
     );
   }
@@ -2628,61 +2767,33 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   : _connectVertices,
         ),
         _compactTool(
-          label: 'Move (M)',
+          label: 'Move on ${_selectedAxis.name.toUpperCase()} (M)',
           icon: Icons.open_with_rounded,
           selected: _tool == ActiveTool.move,
-          onPressed: () {
-            _toggleMoveTool();
-          },
-        ),
-        if (_tool == ActiveTool.move)
-          PopupMenuButton<MeshAxis>(
-            tooltip: 'Constrain movement to axis',
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints.tightFor(width: 30, height: 30),
-            iconSize: 17,
-            icon: Icon(
-              Icons.straighten_rounded,
-              color: _lockedAxis == null ? null : const Color(0xFF9FBEFF),
-            ),
-            onSelected: _lockAxis,
-            itemBuilder: (context) => [
-              for (final axis in MeshAxis.values)
-                PopupMenuItem(
-                  value: axis,
-                  child: Text(axis.name.toUpperCase()),
-                ),
-            ],
-          ),
-        PopupMenuButton<String>(
-          tooltip: 'More editing tools',
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints.tightFor(width: 30, height: 30),
-          iconSize: 17,
-          icon: const Icon(Icons.more_horiz),
-          onSelected: (value) {
-            switch (value) {
-              case 'duplicate':
-                _duplicateSelection();
-              case 'delete':
-                _deleteFace();
-            }
-          },
-          itemBuilder: (context) => [
-            const PopupMenuItem(
-              value: 'duplicate',
-              child: Text('Duplicate selection'),
-            ),
-            if (_mode == EditMode.face)
-              const PopupMenuItem(
-                value: 'delete',
-                child: Text('Delete selected face'),
-              ),
-          ],
+          onPressed: _startMovingOnSelectedAxis,
         ),
       ],
     );
   }
+
+  Widget _buildAxisButtons() => SegmentedButton<MeshAxis>(
+        segments: const [
+          ButtonSegment(value: MeshAxis.x, label: Text('X')),
+          ButtonSegment(value: MeshAxis.y, label: Text('Y')),
+          ButtonSegment(value: MeshAxis.z, label: Text('Z')),
+        ],
+        selected: {_selectedAxis},
+        showSelectedIcon: false,
+        style: const ButtonStyle(
+          visualDensity: VisualDensity.compact,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          padding: WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 5)),
+          textStyle: WidgetStatePropertyAll(
+            TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+          ),
+        ),
+        onSelectionChanged: (selection) => _selectAxis(selection.single),
+      );
 
   Widget _buildHistoryButtons() => Row(
         mainAxisSize: MainAxisSize.min,
@@ -2842,7 +2953,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   Widget _buildSidePanel() {
     return Container(
       decoration: _panelDecoration(),
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -2868,12 +2979,16 @@ class _ModelerScreenState extends State<ModelerScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 14),
-          _pageButton(EditorPage.model, Icons.view_in_ar_rounded, 'Model'),
-          const SizedBox(height: 6),
-          _pageButton(EditorPage.uv, Icons.grid_on_rounded, 'UV layout'),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _pageButton(EditorPage.model, Icons.view_in_ar_rounded, 'Scene'),
+              const SizedBox(width: 8),
+              _pageButton(EditorPage.uv, Icons.grid_on_rounded, 'UV layout'),
+            ],
+          ),
           if (_page == EditorPage.model) ...[
-            const Divider(height: 28),
+            const Divider(height: 20),
             Row(
               children: [
                 Expanded(
@@ -2947,6 +3062,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       }
                       final object = _objects[meshIndex];
                       final active = meshIndex == _activeObjectIndex;
+                      final vertexCount = object.mesh.vertices.length;
+                      final faceCount = object.mesh.faces.length;
                       return Padding(
                         padding: EdgeInsets.only(
                           left: groupName == null ? 0 : 18,
@@ -2965,20 +3082,21 @@ class _ModelerScreenState extends State<ModelerScreen> {
                             borderRadius: BorderRadius.circular(8),
                             child: ListTile(
                               dense: true,
+                              visualDensity: VisualDensity.compact,
+                              contentPadding:
+                                  const EdgeInsets.symmetric(horizontal: 8),
                               selected: active,
                               selectedTileColor: const Color(0xFF283955),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8),
                               ),
-                              leading: const Icon(
-                                Icons.view_in_ar_rounded,
-                                size: 18,
-                              ),
-                              title: Text(object.name),
-                              subtitle: Text(
-                                '${object.mesh.vertices.length} vertices · '
-                                '${object.mesh.faces.length} faces',
-                                style: const TextStyle(fontSize: 11),
+                              title: Text(
+                                '${object.name} · '
+                                '$vertexCount ${vertexCount == 1 ? 'vertex' : 'vertices'} · '
+                                '$faceCount ${faceCount == 1 ? 'face' : 'faces'}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 12),
                               ),
                               onTap: () => _selectMesh(meshIndex),
                             ),
@@ -3033,7 +3151,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
             _page == EditorPage.model
                 ? 'Numpad 1 / 3 / 7: front, right, top\n'
                     'Numpad 2 / 4 / 6 / 8: orbit\n'
-                    'M, then X / Y / Z: constrained move\n'
+                    'X / Y / Z: choose axis · M: constrained move\n'
                     'Shift+D: duplicate selection'
                 : 'Drag a UV corner to adjust the mapping',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -3047,17 +3165,43 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   Widget _pageButton(EditorPage page, IconData icon, String label) {
-    return SizedBox(
-      width: double.infinity,
-      child: TextButton.icon(
-        onPressed: () => setState(() => _page = page),
-        icon: Icon(icon, size: 18),
-        label: Align(alignment: Alignment.centerLeft, child: Text(label)),
-        style: TextButton.styleFrom(
-          foregroundColor: _page == page ? Colors.white : Colors.white70,
-          backgroundColor:
-              _page == page ? const Color(0xFF2A3546) : Colors.transparent,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+    final selected = _page == page;
+    return Expanded(
+      child: InkWell(
+        onTap: () => setState(() => _page = page),
+        borderRadius: BorderRadius.circular(6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 52,
+              height: 46,
+              decoration: BoxDecoration(
+                color: selected
+                    ? const Color(0xFF2A3546)
+                    : const Color(0xFF1D222B),
+                border: Border.all(
+                  color: selected
+                      ? const Color(0xFF4E8DFF)
+                      : const Color(0xFF394252),
+                ),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Icon(
+                icon,
+                size: 19,
+                color: selected ? const Color(0xFF9FBEFF) : Colors.white70,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 10,
+                color: selected ? Colors.white : Colors.white60,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -3452,7 +3596,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ),
           if (wide && _page == EditorPage.model)
             Text(
-              'Drag: orbit · M then X/Y/Z: move · Shift+D: duplicate',
+              'Drag: orbit · X/Y/Z then M: move · Shift+D: duplicate',
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
                     color: Colors.white38,
                   ),
@@ -3463,9 +3607,6 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   String _statusText() {
-    if (_awaitingRotationAxis) {
-      return 'Rotate: press X, Y, or Z to choose an axis';
-    }
     if (_rotationAxis != null) {
       return 'Rotate ${_rotationAxis!.name.toUpperCase()}: '
           '${_rotationDegrees.isEmpty ? 'type degrees' : _rotationDegrees} · Enter';

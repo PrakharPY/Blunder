@@ -152,21 +152,25 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const BlunderApp());
-    final firstMeshTile =
-        find.ancestor(of: find.text('Mesh_1'), matching: find.byType(ListTile));
+    final firstMeshTile = find.ancestor(
+      of: find.textContaining('Mesh_1'),
+      matching: find.byType(ListTile),
+    );
     expect(tester.widget<ListTile>(firstMeshTile).selected, isTrue);
 
     await tester.tap(find.byTooltip('Add mesh').last);
     await tester.pumpAndSettle();
 
-    expect(find.text('Mesh_1'), findsOneWidget);
-    expect(find.text('Mesh_2'), findsOneWidget);
-    final secondMeshTile =
-        find.ancestor(of: find.text('Mesh_2'), matching: find.byType(ListTile));
+    expect(find.textContaining('Mesh_1'), findsOneWidget);
+    expect(find.textContaining('Mesh_2'), findsOneWidget);
+    final secondMeshTile = find.ancestor(
+      of: find.textContaining('Mesh_2'),
+      matching: find.byType(ListTile),
+    );
     expect(tester.widget<ListTile>(firstMeshTile).selected, isFalse);
     expect(tester.widget<ListTile>(secondMeshTile).selected, isTrue);
 
-    await tester.tap(find.text('Mesh_1'));
+    await tester.tap(find.textContaining('Mesh_1'));
     await tester.pumpAndSettle();
     expect(tester.widget<ListTile>(firstMeshTile).selected, isTrue);
     expect(tester.widget<ListTile>(secondMeshTile).selected, isFalse);
@@ -179,7 +183,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const BlunderApp());
-    await tester.longPress(find.text('Mesh_1'));
+    await tester.longPress(find.textContaining('Mesh_1'));
     await tester.pumpAndSettle();
     expect(find.text('Rename mesh'), findsOneWidget);
     await tester.tap(find.text('Rename mesh'));
@@ -187,25 +191,25 @@ void main() {
     await tester.enterText(find.byType(TextField).last, 'Ground');
     await tester.tap(find.text('Rename'));
     await tester.pumpAndSettle();
-    expect(find.text('Ground'), findsOneWidget);
+    expect(find.textContaining('Ground'), findsOneWidget);
 
-    await tester.longPress(find.text('Ground'));
+    await tester.longPress(find.textContaining('Ground').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Create copy'));
     await tester.pumpAndSettle();
-    expect(find.text('Ground_copy'), findsOneWidget);
+    expect(find.textContaining('Ground_copy'), findsOneWidget);
 
-    await tester.tap(find.text('Ground_copy'));
+    await tester.tap(find.textContaining('Ground_copy'));
     await tester.pumpAndSettle();
-    await tester.longPress(find.text('Ground'));
+    await tester.longPress(find.textContaining('Ground').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Delete mesh'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Delete'));
     await tester.pumpAndSettle();
-    expect(find.text('Ground'), findsNothing);
+    expect(find.textContaining('Ground ·'), findsNothing);
     final remainingTile = find.ancestor(
-      of: find.text('Ground_copy'),
+      of: find.textContaining('Ground_copy'),
       matching: find.byType(ListTile),
     );
     expect(tester.widget<ListTile>(remainingTile).selected, isTrue);
@@ -228,7 +232,7 @@ void main() {
     await tester.tapAt(viewport.center + const Offset(30, 0));
     await tester.pumpAndSettle();
 
-    expect(find.text('6 vertices · 1 faces'), findsOneWidget);
+    expect(find.textContaining('6 vertices · 1 face'), findsOneWidget);
     expect(find.text('Tap the surface to place a vertex'), findsOneWidget);
   });
 
@@ -404,6 +408,55 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('axis toolbar constrains move and Mesh menu duplicates selection',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.text('Y').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Move on Y (M)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Free view · Move along Y · drag'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Mesh menu'));
+    await tester.pumpAndSettle();
+    expect(find.text('Duplicate selection  (Shift+D)'), findsOneWidget);
+    await tester.tap(find.text('Duplicate selection  (Shift+D)'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Move on Y (M)'), findsOneWidget);
+    expect(find.byTooltip('More editing tools'), findsNothing);
+  });
+
+  testWidgets('Help menu opens shortcut list and About credits',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Help menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Shortcut Keys'));
+    await tester.pumpAndSettle();
+    expect(find.text('Shortcut Keys'), findsOneWidget);
+    expect(find.textContaining('Select all vertices/faces'), findsOneWidget);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Help menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('About Blunder'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Blunder v1.05'), findsOneWidget);
+    expect(find.textContaining('Prakhar Kumar Yadav'), findsOneWidget);
+    expect(find.textContaining('GitHub Copilot'), findsOneWidget);
+  });
+
   testWidgets('Strip continuously adds connected triangle faces',
       (tester) async {
     tester.view.physicalSize = const Size(1100, 800);
@@ -426,7 +479,7 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    expect(find.text('8 vertices · 3 faces'), findsOneWidget);
+    expect(find.textContaining('8 vertices · 3 faces'), findsOneWidget);
     expect(find.text('Strip: place next vertex to add a triangle'),
         findsOneWidget);
   });
@@ -469,7 +522,7 @@ void main() {
     await tester.tap(find.byTooltip('Hide scene panel'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Mesh_1'), findsNothing);
+    expect(find.textContaining('Mesh_1'), findsNothing);
     expect(find.byTooltip('Show scene panel'), findsOneWidget);
     final collapsed =
         tester.getRect(find.byKey(const ValueKey('modelViewport')));
@@ -477,7 +530,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Show scene panel'));
     await tester.pumpAndSettle();
-    expect(find.text('Mesh_1'), findsOneWidget);
+    expect(find.textContaining('Mesh_1'), findsOneWidget);
   });
 
   testWidgets('left Ctrl and left Shift wheel pan without zooming',

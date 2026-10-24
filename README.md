@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.04** — Windows-first polygon modeling MVP.
+**Version 1.05** — Windows-first polygon modeling MVP.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
@@ -72,9 +72,11 @@ flutter test
 - Choose **Front**, **Back**, **Left**, **Right**, **Top**, or **Bottom** to
   align the viewport; **Free** restores the orbiting view. Drag to orbit and
   pinch to zoom or use two fingers to pan.
-- Select vertices or a face, press **M**, choose **X**, **Y**, or **Z**, then
-  drag in the viewport to move the selection along that world axis. Use
-  **Duplicate** or **Shift+D** before moving to make a separate copy.
+- Select **X**, **Y**, or **Z** in the top toolbar, then press **M** or click
+  Move and drag to constrain movement to that world axis. **Shift+D** or
+  **Mesh → Duplicate selection** makes a copy that can be moved on the selected
+  axis. **R** enters a rotation angle around the selected axis; press **Enter**
+  to apply it.
 - Choose a view from the **View** menu or each viewport's eye menu. Activate a
   viewport and choose **Add → Reference image** to load a blueprint for that
   quadrant. Each quadrant keeps its own reference image; adjust its opacity or
@@ -140,3 +142,6 @@ Free view can orbit over and underneath the model.
 The app is implemented in Flutter/Dart, which keeps the desktop and Android
 targets on one shared codebase. Python would add a separate runtime and would
 not simplify the existing Flutter UI or platform packaging.
+
+Use **Help → Shortcut Keys** in the app for the complete shortcut reference,
+and **Help → About Blunder** for application and creator credits.
