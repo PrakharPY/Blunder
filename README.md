@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.06** — Windows-first polygon modeling MVP.
+**Version 1.07** — Windows and Android polygon modeling build.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
@@ -129,6 +129,25 @@ flutter test
   **Enter** to move the selection. Press **E**, then **X** or **Y**, and drag
   to stretch along that UV axis; **M**, then **X** or **Y**, mirrors the
   selection. **Enter** confirms UV transforms and **Esc** cancels a transform.
+- Press **U** or choose **Mesh → UV mapping** for **Project from view** or
+  **Smart UV unwrap**. Mapping operates on selected faces and leaves other
+  faces' UVs unchanged; with no faces selected it maps the full mesh. In the UV
+  editor press **R** and drag horizontally to rotate selected UV corners, or
+  enter a degree value and press **Enter**. Touch users can use the visible
+  Rotate, degrees, confirm, and cancel controls.
+- Choose **Add → Cube / Cylinder / Circle / Rectangle** to create common
+  starting shapes. Select **Hand tool** and drag to move a reference image, or
+  pan the grid when no reference image is loaded.
+- Toggle the **Flat / Smooth shading** toolbar button to change the active
+  mesh's viewport lighting; the setting is saved in PKY scene files. The
+  viewport batches solid faces and caches projected vertices to keep larger
+  meshes responsive.
+- Blunder enforces a **50,000 face per scene limit** for imported scenes and
+  model edits. OBJ parsing runs off the UI isolate; oversized OBJ/PKY scenes
+  are rejected with an explicit limit message.
+- Android includes touch buttons for box/select-all, delete, scale, hand pan,
+  UV box selection/rotation, and mesh selection/joining alongside the desktop
+  menus and gestures.
 - Switch between **Solid**, **Textured**, and **Wireframe** from the **Scene**
   menu. Texture preview displays an assigned image when available; otherwise
   the mesh remains gray.

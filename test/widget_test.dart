@@ -96,6 +96,17 @@ void main() {
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyR);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('UV rotate'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit9);
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit0);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('UV rotate 90°'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('UV rotate'), findsNothing);
   });
 
   testWidgets('keyboard switches views and locks move to an axis',
@@ -571,7 +582,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('About Blunder'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Blunder v1.06'), findsOneWidget);
+    expect(find.textContaining('Blunder v1.07'), findsOneWidget);
     expect(find.textContaining('Prakhar Kumar Yadav'), findsOneWidget);
     expect(find.textContaining('GitHub Copilot'), findsOneWidget);
   });

@@ -12,6 +12,96 @@ void main() {
       expect(mesh.faces.single.uv, hasLength(4));
     });
 
+    test('creates primitive meshes with valid polygon topology', () {
+      final cube = MeshModel.cube();
+      final cylinder = MeshModel.cylinder();
+      final circle = MeshModel.circle();
+      final rectangle = MeshModel.rectangle();
+
+      expect((cube.vertices.length, cube.faces.length), (8, 6));
+      expect(cube.faces.every((face) => face.vertices.length == 4), isTrue);
+      expect(cylinder.vertices.length, 48);
+      expect(cylinder.faces.length, 26);
+      expect(
+          cylinder.faces
+              .every((face) => face.uv.length == face.vertices.length),
+          isTrue);
+      expect(circle.faces.single.vertices, hasLength(32));
+      expect(rectangle.faces.single.vertices, hasLength(4));
+    });
+
+    test('smart remapping changes only selected faces', () {
+      final mesh = MeshModel.starterPlane()
+        ..vertices.addAll([
+          const MeshVertex(Vec3(3, -1, 0)),
+          const MeshVertex(Vec3(5, -1, 0)),
+          const MeshVertex(Vec3(5, 1, 0)),
+          const MeshVertex(Vec3(3, 1, 0)),
+        ])
+        ..faces.add(
+          MeshFace(
+            const [4, 5, 6, 7],
+            const [
+              Offset(0.1, 0.1),
+              Offset(0.2, 0.1),
+              Offset(0.2, 0.2),
+              Offset(0.1, 0.2),
+            ],
+          ),
+        );
+      final unselectedUv = List<Offset>.of(mesh.faces[1].uv);
+
+      expect(mesh.smartUvRemap([0]), isTrue);
+
+      expect(mesh.faces[1].uv, unselectedUv);
+      expect(
+          mesh.faces[0].uv,
+          isNot([
+            const Offset(0.08, 0.08),
+            const Offset(0.92, 0.08),
+            const Offset(0.92, 0.92),
+            const Offset(0.08, 0.92),
+          ]));
+    });
+
+    test('projects selected faces from view without changing other UVs', () {
+      final mesh = MeshModel.starterPlane()
+        ..vertices.addAll([
+          const MeshVertex(Vec3(3, -1, 0)),
+          const MeshVertex(Vec3(5, -1, 0)),
+          const MeshVertex(Vec3(5, 1, 0)),
+          const MeshVertex(Vec3(3, 1, 0)),
+        ])
+        ..faces.add(
+          MeshFace(
+            const [4, 5, 6, 7],
+            const [
+              Offset(0.1, 0.1),
+              Offset(0.2, 0.1),
+              Offset(0.2, 0.2),
+              Offset(0.1, 0.2),
+            ],
+          ),
+        );
+      final untouched = List<Offset>.of(mesh.faces[1].uv);
+
+      expect(
+        mesh.projectUvFromView(
+          [0],
+          const Vec3(1, 0, 0),
+          const Vec3(0, 1, 0),
+        ),
+        isTrue,
+      );
+
+      expect(mesh.faces[0].uv, hasLength(4));
+      expect(
+          mesh.faces[0].uv.every((uv) =>
+              uv.dx >= 0.05 && uv.dx <= 0.95 && uv.dy >= 0.05 && uv.dy <= 0.95),
+          isTrue);
+      expect(mesh.faces[1].uv, untouched);
+    });
+
     test('creates a flat grid surface with continuous UV coordinates', () {
       final mesh = MeshModel.empty();
 

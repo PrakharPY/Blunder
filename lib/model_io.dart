@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'dart:ui' show Offset;
 
@@ -20,13 +21,29 @@ class ModelMeshData {
 }
 
 class ModelIo {
+  static const int maxFaceCount = 50000;
+
+  static void _validateFaceCount(Iterable<ModelMeshData> objects) {
+    final count = objects.fold<int>(
+      0,
+      (total, object) => total + object.mesh.faces.length,
+    );
+    if (count > maxFaceCount) {
+      throw FormatException(
+        'The scene has $count faces; Blunder supports up to $maxFaceCount.',
+      );
+    }
+  }
+
   static String encodePky(Iterable<ModelMeshData> objects) {
+    final objectList = objects.toList();
+    _validateFaceCount(objectList);
     final output = StringBuffer(
       '# Blunder PKY 1.0 (Wavefront OBJ-compatible geometry)\n',
     );
     var vertexOffset = 1;
     var uvOffset = 1;
-    for (final object in objects) {
+    for (final object in objectList) {
       final name = object.name.trim().replaceAll(RegExp(r'[\r\n]+'), '_');
       output.writeln('o ${name.isEmpty ? 'Mesh' : name}');
       final texturePath = object.texturePath;
@@ -42,6 +59,9 @@ class ModelIo {
           '# blunder_group_base64='
           '${base64Url.encode(utf8.encode(groupName))}',
         );
+      }
+      if (object.mesh.smoothShading) {
+        output.writeln('# blunder_smooth_shading=1');
       }
       for (final vertex in object.mesh.vertices) {
         final position = vertex.position;
@@ -78,6 +98,7 @@ class ModelIo {
     final positions = <Vec3>[];
     final textureCoordinates = <Offset>[];
     final builders = <_ObjectBuilder>[];
+    var faceCount = 0;
     _ObjectBuilder? current;
 
     _ObjectBuilder objectFor(String name) {
@@ -113,6 +134,8 @@ class ModelIo {
               'Invalid group metadata at line ${lineNumber + 1}: $error',
             );
           }
+        } else if (trimmed == '# blunder_smooth_shading=1') {
+          objectFor('Mesh_${builders.length + 1}').smoothShading = true;
         }
         continue;
       }
@@ -159,6 +182,12 @@ class ModelIo {
                 '${values.length} corners.',
               );
             }
+            if (faceCount >= maxFaceCount) {
+              throw const FormatException(
+                'Blunder supports up to 50000 faces per scene.',
+              );
+            }
+            faceCount++;
             final faceVertices = <int>[];
             final faceUvs = <Offset>[];
             for (final value in values) {
@@ -223,7 +252,11 @@ class ModelIo {
       final orderedVertices = builder.vertexIndices.toList();
       final localPositions =
           orderedVertices.map((index) => positions[index]).toList();
-      final mesh = MeshModel.fromData(localPositions, builder.faces);
+      final mesh = MeshModel.fromData(
+        localPositions,
+        builder.faces,
+        smoothShading: builder.smoothShading,
+      );
       return ModelMeshData(
         name: builder.name,
         mesh: mesh,
@@ -256,14 +289,16 @@ class ModelIo {
     }
 
     final builders = <_ObjectBuilder>[];
+    var faceCount = 0;
     final buildersByKey = <String, _ObjectBuilder>{};
     var objectName = 'Mesh';
     var subgroupName = '';
     var materialName = '';
+    var smoothShading = false;
 
     _ObjectBuilder builderForCurrentMaterial() {
       final key = '$objectName\u0000$subgroupName\u0000$materialName';
-      return buildersByKey.putIfAbsent(key, () {
+      final builder = buildersByKey.putIfAbsent(key, () {
         final name = [
           objectName,
           if (subgroupName.isNotEmpty) subgroupName,
@@ -276,6 +311,8 @@ class ModelIo {
         builders.add(builder);
         return builder;
       });
+      builder.smoothShading = smoothShading;
+      return builder;
     }
 
     final lines = const LineSplitter().convert(content);
@@ -351,6 +388,12 @@ class ModelIo {
                         corner++)
                       [0, corner, corner + 1],
                   ];
+            if (faceCount + faceCorners.length > maxFaceCount) {
+              throw const FormatException(
+                'Blunder supports up to 50000 faces per scene.',
+              );
+            }
+            faceCount += faceCorners.length;
             for (final corners in faceCorners) {
               final uv = corners.map((index) => faceUvs[index]).toList();
               final fallbackUv = corners.length == 4
@@ -376,9 +419,13 @@ class ModelIo {
             }
           case 'usemtl':
             materialName = values.join(' ');
+          case 's':
+            smoothShading = values.isNotEmpty &&
+                values.first != 'off' &&
+                values.first != '0';
+            builderForCurrentMaterial().smoothShading = smoothShading;
           case 'mtllib':
           case 'vn':
-          case 's':
           case 'vp':
           case 'l':
             break;
@@ -400,7 +447,11 @@ class ModelIo {
           builder.vertexIndices.map((index) => positions[index]).toList();
       return ModelMeshData(
         name: builder.name,
-        mesh: MeshModel.fromData(localPositions, builder.faces),
+        mesh: MeshModel.fromData(
+          localPositions,
+          builder.faces,
+          smoothShading: builder.smoothShading,
+        ),
         texturePath: builder.texturePath,
         groupName: builder.groupName,
       );
@@ -483,23 +534,91 @@ class ModelIo {
         }
       }
     }
-    return decodeObj(
-      content,
-      baseDirectory: File(path).parent.path,
-      materialLibraries: libraries,
-      groupName: File(path).uri.pathSegments.last.replaceFirst(
-            RegExp(r'\.[^.]+$'),
-            '',
-          ),
+    final baseDirectory = File(path).parent.path;
+    final groupName = File(path).uri.pathSegments.last.replaceFirst(
+          RegExp(r'\.[^.]+$'),
+          '',
+        );
+    final serialized = await Isolate.run(
+      () => jsonEncode(
+        decodeObj(
+          content,
+          baseDirectory: baseDirectory,
+          materialLibraries: libraries,
+          groupName: groupName,
+        )
+            .map(
+              (object) => {
+                'name': object.name,
+                'texturePath': object.texturePath,
+                'groupName': object.groupName,
+                'vertices': [
+                  for (final vertex in object.mesh.vertices)
+                    [
+                      vertex.position.x,
+                      vertex.position.y,
+                      vertex.position.z,
+                    ],
+                ],
+                'faces': [
+                  for (final face in object.mesh.faces)
+                    {
+                      'vertices': face.vertices,
+                      'uv': [
+                        for (final uv in face.uv) [uv.dx, uv.dy],
+                      ],
+                    },
+                ],
+              },
+            )
+            .toList(),
+      ),
+    );
+    final decoded = jsonDecode(serialized) as List<dynamic>;
+    return [
+      for (final rawObject in decoded)
+        _modelMeshFromJson(rawObject as Map<String, dynamic>),
+    ];
+  }
+
+  static ModelMeshData _modelMeshFromJson(Map<String, dynamic> object) {
+    final positions = (object['vertices'] as List<dynamic>).map((rawVertex) {
+      final values = rawVertex as List<dynamic>;
+      return Vec3(
+        (values[0] as num).toDouble(),
+        (values[1] as num).toDouble(),
+        (values[2] as num).toDouble(),
+      );
+    });
+    final faces = (object['faces'] as List<dynamic>).map((rawFace) {
+      final face = rawFace as Map<String, dynamic>;
+      final vertices = (face['vertices'] as List<dynamic>).cast<int>();
+      final uv = (face['uv'] as List<dynamic>).map((rawUv) {
+        final values = rawUv as List<dynamic>;
+        return Offset(
+          (values[0] as num).toDouble(),
+          (values[1] as num).toDouble(),
+        );
+      });
+      return MeshFace(vertices, uv.toList());
+    });
+    return ModelMeshData(
+      name: object['name'] as String,
+      mesh: MeshModel.fromData(positions, faces),
+      texturePath: object['texturePath'] as String?,
+      groupName: object['groupName'] as String?,
     );
   }
 
   static String encodeObj(Iterable<ModelMeshData> objects) {
+    final objectList = objects.toList();
+    _validateFaceCount(objectList);
     final output = StringBuffer('# Blunder OBJ export\n');
     var vertexOffset = 1;
     var uvOffset = 1;
-    for (final object in objects) {
+    for (final object in objectList) {
       output.writeln('o ${_objectName(object.name)}');
+      output.writeln(object.mesh.smoothShading ? 's 1' : 's off');
       for (final vertex in object.mesh.vertices) {
         final position = vertex.position;
         output.writeln('v ${_number(position.x)} '
@@ -591,6 +710,7 @@ class ModelIo {
     Iterable<ModelMeshData> objects,
   ) async {
     final list = objects.toList();
+    _validateFaceCount(list);
     final output = StringBuffer('# Blunder OBJ export\n');
     final materialName =
         path.replaceAll(RegExp(r'\.obj$', caseSensitive: false), '.mtl');
@@ -609,6 +729,7 @@ class ModelIo {
     for (var objectIndex = 0; objectIndex < list.length; objectIndex++) {
       final object = list[objectIndex];
       output.writeln('o ${_objectName(object.name)}');
+      output.writeln(object.mesh.smoothShading ? 's 1' : 's off');
       for (final vertex in object.mesh.vertices) {
         final position = vertex.position;
         output.writeln('v ${_number(position.x)} '
@@ -676,4 +797,5 @@ class _ObjectBuilder {
   final List<MeshFace> faces = [];
   String? texturePath;
   String? groupName;
+  bool smoothShading = false;
 }

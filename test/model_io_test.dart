@@ -8,6 +8,7 @@ void main() {
   group('ModelIo', () {
     test('round-trips multiple meshes, quad UVs, and texture metadata', () {
       final first = MeshModel.starterPlane();
+      first.smoothShading = true;
       first.updateUv(0, 2, const Offset(0.7, 0.6));
       final second = MeshModel.starterPlane()
         ..moveVertices(
@@ -33,6 +34,7 @@ void main() {
       expect(decoded[0].mesh.vertices, hasLength(4));
       expect(decoded[0].mesh.faces.single.vertices, [0, 1, 2, 3]);
       expect(decoded[0].mesh.faces.single.uv[2], const Offset(0.7, 0.6));
+      expect(decoded[0].mesh.smoothShading, isTrue);
       expect(decoded[1].mesh.vertices[0].position.x, 2);
       expect(decoded[1].mesh.vertices[0].position.z, 2);
     });
@@ -56,6 +58,21 @@ void main() {
           'o Mesh_1\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 9\n',
         ),
         throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('rejects scenes containing more than 50000 faces', () {
+      final faces = List<String>.filled(50001, 'f 1 2 3').join('\n');
+
+      expect(
+        () => ModelIo.decodePky('v 0 0 0\nv 1 0 0\nv 0 1 0\n$faces\n'),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            contains('50000 faces'),
+          ),
+        ),
       );
     });
 
@@ -155,6 +172,19 @@ void main() {
       expect(
         imported.single.mesh.faces.every((face) => face.vertices.length == 3),
         isTrue,
+      );
+    });
+
+    test('preserves smooth-shading groups in OBJ files', () {
+      final imported = ModelIo.decodeObj(
+        'o Surface\ns 1\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n',
+        baseDirectory: Directory.systemTemp.path,
+      );
+
+      expect(imported.single.mesh.smoothShading, isTrue);
+      expect(
+        ModelIo.encodeObj(imported),
+        contains('s 1'),
       );
     });
   });

@@ -25,22 +25,29 @@ class MeshFace {
 }
 
 class MeshModel {
-  MeshModel._(this.vertices, this.faces);
+  static const int maxFaceCount = 50000;
+
+  MeshModel._(this.vertices, this.faces, {this.smoothShading = false});
 
   factory MeshModel.empty() => MeshModel._([], []);
 
   factory MeshModel.fromData(
     Iterable<Vec3> positions,
-    Iterable<MeshFace> meshFaces,
-  ) =>
+    Iterable<MeshFace> meshFaces, {
+    bool smoothShading = false,
+  }) =>
       MeshModel._(
         positions.map(MeshVertex.new).toList(),
         meshFaces.toList(),
+        smoothShading: smoothShading,
       );
 
   factory MeshModel.join(Iterable<MeshModel> meshes) {
+    final meshList = meshes.toList();
     final joined = MeshModel.empty();
-    for (final mesh in meshes) {
+    joined.smoothShading =
+        meshList.isNotEmpty && meshList.every((mesh) => mesh.smoothShading);
+    for (final mesh in meshList) {
       final offset = joined.vertices.length;
       joined.vertices.addAll(mesh.vertices);
       joined.faces.addAll(
@@ -79,6 +86,116 @@ class MeshModel {
 
   final List<MeshVertex> vertices;
   final List<MeshFace> faces;
+  bool smoothShading;
+
+  static MeshModel rectangle() => MeshModel.starterPlane();
+
+  static MeshModel circle({int segments = 32}) {
+    final count = segments.clamp(8, 128).toInt();
+    final vertices = [
+      for (var index = 0; index < count; index++)
+        Vec3(
+          math.cos(index * math.pi * 2 / count),
+          math.sin(index * math.pi * 2 / count),
+          0,
+        ),
+    ];
+    final mesh = MeshModel.fromData(vertices, [
+      MeshFace(
+        List.generate(count, (index) => index),
+        [
+          for (final vertex in vertices)
+            Offset((vertex.x + 1) / 2, (vertex.y + 1) / 2),
+        ],
+      ),
+    ]);
+    return mesh;
+  }
+
+  static MeshModel cube() {
+    const positions = [
+      Vec3(-1, -1, -1),
+      Vec3(1, -1, -1),
+      Vec3(1, 1, -1),
+      Vec3(-1, 1, -1),
+      Vec3(-1, -1, 1),
+      Vec3(1, -1, 1),
+      Vec3(1, 1, 1),
+      Vec3(-1, 1, 1),
+    ];
+    const faceVertices = [
+      [0, 3, 2, 1],
+      [4, 5, 6, 7],
+      [0, 1, 5, 4],
+      [3, 7, 6, 2],
+      [0, 4, 7, 3],
+      [1, 2, 6, 5],
+    ];
+    const faceUvs = [
+      Offset(0, 0),
+      Offset(1, 0),
+      Offset(1, 1),
+      Offset(0, 1),
+    ];
+    return MeshModel.fromData(
+      positions,
+      faceVertices.map((face) => MeshFace(face, faceUvs)),
+    );
+  }
+
+  static MeshModel cylinder({int segments = 24}) {
+    final count = segments.clamp(8, 128).toInt();
+    final positions = <Vec3>[
+      for (var level = 0; level < 2; level++)
+        for (var index = 0; index < count; index++)
+          Vec3(
+            math.cos(index * math.pi * 2 / count),
+            math.sin(index * math.pi * 2 / count),
+            level == 0 ? -1 : 1,
+          ),
+    ];
+    final faces = <MeshFace>[];
+    for (var index = 0; index < count; index++) {
+      final next = (index + 1) % count;
+      faces.add(
+        MeshFace(
+          [index, next, count + next, count + index],
+          [
+            Offset(index / count, 0),
+            Offset((index + 1) / count, 0),
+            Offset((index + 1) / count, 1),
+            Offset(index / count, 1),
+          ],
+        ),
+      );
+    }
+    faces
+      ..add(
+        MeshFace(
+          List.generate(count, (index) => count - index - 1),
+          [
+            for (var index = count - 1; index >= 0; index--)
+              Offset(
+                (positions[index].x + 1) / 2,
+                (positions[index].y + 1) / 2,
+              ),
+          ],
+        ),
+      )
+      ..add(
+        MeshFace(
+          List.generate(count, (index) => count + index),
+          [
+            for (var index = 0; index < count; index++)
+              Offset(
+                (positions[count + index].x + 1) / 2,
+                (positions[count + index].y + 1) / 2,
+              ),
+          ],
+        ),
+      );
+    return MeshModel.fromData(positions, faces);
+  }
 
   int addVertex(Vec3 position) {
     vertices.add(MeshVertex(position));
@@ -91,6 +208,7 @@ class MeshModel {
     int verticalSteps,
   ) {
     if (corners.length != 4 ||
+        faces.length + horizontalSteps * verticalSteps > maxFaceCount ||
         horizontalSteps < 1 ||
         horizontalSteps > 64 ||
         verticalSteps < 1 ||
@@ -159,6 +277,7 @@ class MeshModel {
   bool addTriangle(Iterable<int> selectedVertices) {
     final selection = selectedVertices.toList();
     if (selection.length != 3 ||
+        faces.length >= maxFaceCount ||
         selection.toSet().length != 3 ||
         selection.any((index) => index < 0 || index >= vertices.length)) {
       return false;
@@ -549,6 +668,7 @@ class MeshModel {
   bool addQuad(Iterable<int> selectedVertices) {
     final selection = selectedVertices.toSet().toList();
     if (selection.length != 4 ||
+        faces.length >= maxFaceCount ||
         selection.any((index) => index < 0 || index >= vertices.length)) {
       return false;
     }
@@ -664,16 +784,23 @@ class MeshModel {
     return true;
   }
 
-  bool smartUvRemap() {
-    if (faces.isEmpty) return false;
+  bool smartUvRemap([Iterable<int>? selectedFaces]) {
+    final selection = selectedFaces?.toSet().toList() ??
+        List<int>.generate(faces.length, (index) => index);
+    selection.sort();
+    if (selection.isEmpty ||
+        selection.any((index) => index < 0 || index >= faces.length)) {
+      return false;
+    }
 
-    final columns = math.sqrt(faces.length).ceil();
-    final rows = (faces.length / columns).ceil();
+    final columns = math.sqrt(selection.length).ceil();
+    final rows = (selection.length / columns).ceil();
     final cellWidth = 1 / columns;
     final cellHeight = 1 / rows;
     final margin = math.min(cellWidth, cellHeight) * 0.08;
 
-    for (var faceIndex = 0; faceIndex < faces.length; faceIndex++) {
+    for (var layoutIndex = 0; layoutIndex < selection.length; layoutIndex++) {
+      final faceIndex = selection[layoutIndex];
       final face = faces[faceIndex];
       final positions =
           face.vertices.map((index) => vertices[index].position).toList();
@@ -710,8 +837,8 @@ class MeshModel {
         availableWidth / math.max(spanX, 1e-8),
         availableHeight / math.max(spanY, 1e-8),
       );
-      final offsetX = (faceIndex % columns) * cellWidth;
-      final offsetY = 1 - ((faceIndex ~/ columns) + 1) * cellHeight;
+      final offsetX = (layoutIndex % columns) * cellWidth;
+      final offsetY = 1 - ((layoutIndex ~/ columns) + 1) * cellHeight;
       final usedWidth = spanX * scale;
       final usedHeight = spanY * scale;
       final centeredX = offsetX + (cellWidth - usedWidth) / 2;
@@ -726,6 +853,55 @@ class MeshModel {
             ),
           ),
         );
+    }
+    return true;
+  }
+
+  bool projectUvFromView(
+    Iterable<int> selectedFaces,
+    Vec3 right,
+    Vec3 up,
+  ) {
+    final selection = selectedFaces.toSet().toList()..sort();
+    if (selection.isEmpty ||
+        selection.any((index) => index < 0 || index >= faces.length)) {
+      return false;
+    }
+    final positions = selection
+        .expand((faceIndex) => faces[faceIndex].vertices)
+        .map((vertexIndex) => vertices[vertexIndex].position)
+        .toList();
+    double dot(Vec3 point, Vec3 axis) =>
+        point.x * axis.x + point.y * axis.y + point.z * axis.z;
+    final projected = positions
+        .map((point) => Offset(dot(point, right), dot(point, up)))
+        .toList();
+    final minX = projected.map((point) => point.dx).reduce(math.min);
+    final maxX = projected.map((point) => point.dx).reduce(math.max);
+    final minY = projected.map((point) => point.dy).reduce(math.min);
+    final maxY = projected.map((point) => point.dy).reduce(math.max);
+    final spanX = maxX - minX;
+    final spanY = maxY - minY;
+    if (spanX < 1e-8 && spanY < 1e-8) return false;
+    const padding = 0.05;
+    final scale = (1 - 2 * padding) / math.max(math.max(spanX, spanY), 1e-8);
+    final centerX = (minX + maxX) / 2;
+    final centerY = (minY + maxY) / 2;
+    for (final faceIndex in selection) {
+      final face = faces[faceIndex];
+      face.uv
+        ..clear()
+        ..addAll(face.vertices.map((vertexIndex) {
+          final point = vertices[vertexIndex].position;
+          return Offset(
+            (0.5 + (dot(point, right) - centerX) * scale)
+                .clamp(padding, 1 - padding)
+                .toDouble(),
+            (0.5 + (dot(point, up) - centerY) * scale)
+                .clamp(padding, 1 - padding)
+                .toDouble(),
+          );
+        }));
     }
     return true;
   }
