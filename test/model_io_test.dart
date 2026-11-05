@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:blunder/mesh.dart';
 import 'package:blunder/model_io.dart';
@@ -39,6 +40,92 @@ void main() {
       expect(decoded[1].mesh.vertices[0].position.z, 2);
     });
 
+    test('preserves RV face flags and coordinate metadata in PKY', () {
+      final mesh = MeshModel.fromData(
+        const [
+          Vec3(0, 0, 0),
+          Vec3(1, 0, 0),
+          Vec3(1, 1, 0),
+          Vec3(0, 1, 0),
+        ],
+        [
+          MeshFace(
+            const [0, 1, 2, 3],
+            const [
+              Offset(0.1, 0.2),
+              Offset(0.9, 0.2),
+              Offset(0.9, 0.8),
+              Offset(0.1, 0.8),
+            ],
+            rvType: 0x2082,
+            rvTextureIndex: 4,
+            rvColors: const [0xff112233, 0xff223344, 0xff334455, 0xff445566],
+            rvEnvironmentColor: 0xffabcdef,
+          ),
+        ],
+      );
+      final decoded = ModelIo.decodePky(
+        ModelIo.encodePky([
+          ModelMeshData(
+            name: 'RV mesh',
+            mesh: mesh,
+            rvCoordinateScale: 0.005,
+            rvCoordinateOrigin: const Vec3(10, -20, 30),
+            rvTextureAnimations: [
+              Uint8List.fromList([1, 2, 3, 4])
+            ],
+            rvTexturePaths: {4: r'D:\Textures\track.bmp'},
+          ),
+        ]),
+      ).single;
+      final face = decoded.mesh.faces.single;
+
+      expect(decoded.rvCoordinateScale, 0.005);
+      expect(decoded.rvCoordinateOrigin!.x, 10);
+      expect(decoded.rvCoordinateOrigin!.y, -20);
+      expect(decoded.rvCoordinateOrigin!.z, 30);
+      expect(decoded.rvTextureAnimations.single, [1, 2, 3, 4]);
+      expect(decoded.rvTexturePaths[4], r'D:\Textures\track.bmp');
+      expect(face.rvType, 0x2082);
+      expect(face.rvTextureIndex, 4);
+      expect(face.rvColors, [0xff112233, 0xff223344, 0xff334455, 0xff445566]);
+      expect(face.rvEnvironmentColor, 0xffabcdef);
+    });
+
+    test('writes RV texture metadata and copies texture files with PKY',
+        () async {
+      final directory =
+          await Directory.systemTemp.createTemp('blunder_rv_pky_');
+      addTearDown(() => directory.delete(recursive: true));
+      final texturePath = '${directory.path}${Platform.pathSeparator}track.bmp';
+      await File(texturePath).writeAsBytes([1, 2, 3]);
+      final path = '${directory.path}${Platform.pathSeparator}scene.pky';
+
+      await ModelIo.writePky(
+        path,
+        [
+          ModelMeshData(
+            name: 'RV mesh',
+            mesh: MeshModel.starterPlane(),
+            rvCoordinateScale: 0.01,
+            rvCoordinateOrigin: const Vec3(1, 2, 3),
+            rvTexturePaths: {2: texturePath},
+          ),
+        ],
+      );
+      final loaded = (await ModelIo.readPky(path)).single;
+
+      expect(loaded.rvCoordinateScale, 0.01);
+      expect(loaded.rvCoordinateOrigin!.z, 3);
+      expect(loaded.rvTexturePaths[2], 'scene_mesh1_rv2.bmp');
+      expect(
+        await File(
+          '${directory.path}${Platform.pathSeparator}scene_mesh1_rv2.bmp',
+        ).exists(),
+        isTrue,
+      );
+    });
+
     test('rejects non-quad or invalid face indices with a line number', () {
       expect(
         () => ModelIo.decodePky(
@@ -61,8 +148,8 @@ void main() {
       );
     });
 
-    test('rejects scenes containing more than 50000 faces', () {
-      final faces = List<String>.filled(50001, 'f 1 2 3').join('\n');
+    test('rejects scenes containing more than 100000 faces', () {
+      final faces = List<String>.filled(100001, 'f 1 2 3').join('\n');
 
       expect(
         () => ModelIo.decodePky('v 0 0 0\nv 1 0 0\nv 0 1 0\n$faces\n'),
@@ -70,7 +157,7 @@ void main() {
           isA<FormatException>().having(
             (error) => error.message,
             'message',
-            contains('50000 faces'),
+            contains('100000 faces'),
           ),
         ),
       );

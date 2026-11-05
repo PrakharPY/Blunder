@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'dart:ui' show Offset;
 
@@ -12,16 +13,24 @@ class ModelMeshData {
     required this.mesh,
     this.texturePath,
     this.groupName,
+    this.rvCoordinateScale,
+    this.rvCoordinateOrigin,
+    this.rvTextureAnimations = const [],
+    this.rvTexturePaths = const {},
   });
 
   final String name;
   final MeshModel mesh;
   final String? texturePath;
   final String? groupName;
+  final double? rvCoordinateScale;
+  final Vec3? rvCoordinateOrigin;
+  final List<Uint8List> rvTextureAnimations;
+  final Map<int, String> rvTexturePaths;
 }
 
 class ModelIo {
-  static const int maxFaceCount = 50000;
+  static const int maxFaceCount = 100000;
 
   static void _validateFaceCount(Iterable<ModelMeshData> objects) {
     final count = objects.fold<int>(
@@ -63,6 +72,26 @@ class ModelIo {
       if (object.mesh.smoothShading) {
         output.writeln('# blunder_smooth_shading=1');
       }
+      if (object.rvCoordinateScale != null) {
+        output.writeln(
+          '# blunder_rv_metadata_base64=${base64Url.encode(utf8.encode(jsonEncode({
+                'scale': object.rvCoordinateScale,
+                'origin': [
+                  object.rvCoordinateOrigin?.x ?? 0,
+                  object.rvCoordinateOrigin?.y ?? 0,
+                  object.rvCoordinateOrigin?.z ?? 0,
+                ],
+                'animations': [
+                  for (final animation in object.rvTextureAnimations)
+                    base64Url.encode(animation),
+                ],
+                'textures': {
+                  for (final entry in object.rvTexturePaths.entries)
+                    entry.key.toString(): entry.value,
+                },
+              })))}',
+        );
+      }
       for (final vertex in object.mesh.vertices) {
         final position = vertex.position;
         output.writeln('v ${_number(position.x)} '
@@ -75,6 +104,20 @@ class ModelIo {
       }
       var faceUvOffset = uvOffset;
       for (final face in object.mesh.faces) {
+        if (object.rvCoordinateScale != null) {
+          output.writeln(
+            '# blunder_rv_face_base64=${base64Url.encode(utf8.encode(jsonEncode({
+                  'type': face.rvType,
+                  'texture': face.rvTextureIndex,
+                  'colors': face.rvColors,
+                  'extraColor': face.rvExtraColor,
+                  'extraUv': face.rvExtraUv == null
+                      ? null
+                      : [face.rvExtraUv!.dx, face.rvExtraUv!.dy],
+                  'environmentColor': face.rvEnvironmentColor,
+                })))}',
+          );
+        }
         final refs = <String>[];
         for (var corner = 0; corner < face.vertices.length; corner++) {
           refs.add(
@@ -136,6 +179,65 @@ class ModelIo {
           }
         } else if (trimmed == '# blunder_smooth_shading=1') {
           objectFor('Mesh_${builders.length + 1}').smoothShading = true;
+        } else if (trimmed.startsWith('# blunder_rv_metadata_base64=')) {
+          const key = '# blunder_rv_metadata_base64=';
+          try {
+            final builder = objectFor('Mesh_${builders.length + 1}');
+            final decoded = jsonDecode(
+              utf8.decode(base64Url.decode(trimmed.substring(key.length))),
+            );
+            if (decoded is! Map<String, dynamic> ||
+                decoded['scale'] is! num ||
+                decoded['origin'] is! List ||
+                (decoded['origin'] as List).length != 3) {
+              throw const FormatException('Invalid RV scene metadata.');
+            }
+            final origin = decoded['origin'] as List;
+            builder.rvCoordinateScale = (decoded['scale'] as num).toDouble();
+            builder.rvCoordinateOrigin = Vec3(
+              (origin[0] as num).toDouble(),
+              (origin[1] as num).toDouble(),
+              (origin[2] as num).toDouble(),
+            );
+            final animations = decoded['animations'];
+            if (animations is List) {
+              builder.rvTextureAnimations = [
+                for (final animation in animations)
+                  Uint8List.fromList(base64Url.decode(animation as String)),
+              ];
+            }
+            final textures = decoded['textures'];
+            if (textures is Map) {
+              builder.rvTexturePaths = {
+                for (final entry in textures.entries)
+                  int.parse(entry.key as String): entry.value as String,
+              };
+            }
+          } on FormatException catch (error) {
+            throw FormatException(
+              'Invalid RV metadata at line ${lineNumber + 1}: $error',
+            );
+          } on TypeError catch (error) {
+            throw FormatException(
+              'Invalid RV metadata at line ${lineNumber + 1}: $error',
+            );
+          }
+        } else if (trimmed.startsWith('# blunder_rv_face_base64=')) {
+          const key = '# blunder_rv_face_base64=';
+          try {
+            final builder = objectFor('Mesh_${builders.length + 1}');
+            final decoded = jsonDecode(
+              utf8.decode(base64Url.decode(trimmed.substring(key.length))),
+            );
+            if (decoded is! Map<String, dynamic>) {
+              throw const FormatException('Invalid RV face metadata.');
+            }
+            builder.pendingRvFace = decoded;
+          } on FormatException catch (error) {
+            throw FormatException(
+              'Invalid RV face metadata at line ${lineNumber + 1}: $error',
+            );
+          }
         }
         continue;
       }
@@ -184,7 +286,7 @@ class ModelIo {
             }
             if (faceCount >= maxFaceCount) {
               throw const FormatException(
-                'Blunder supports up to 50000 faces per scene.',
+                'Blunder supports up to 100000 faces per scene.',
               );
             }
             faceCount++;
@@ -211,6 +313,8 @@ class ModelIo {
                 faceUvs.add(textureCoordinates[uvIndex]);
               }
             }
+            final rvData = target.pendingRvFace;
+            target.pendingRvFace = null;
             target.faces.add(
               MeshFace(
                 faceVertices,
@@ -228,6 +332,31 @@ class ModelIo {
                             Offset(0.92, 0.92),
                             Offset(0.08, 0.92),
                           ],
+                rvType: rvData?['type'] is num
+                    ? (rvData!['type'] as num).toInt()
+                    : 0,
+                rvTextureIndex: rvData?['texture'] is num
+                    ? (rvData!['texture'] as num).toInt()
+                    : 0,
+                rvColors: rvData?['colors'] is List
+                    ? (rvData!['colors'] as List)
+                        .whereType<num>()
+                        .map((color) => color.toInt())
+                        .toList()
+                    : const [],
+                rvExtraColor: rvData?['extraColor'] is num
+                    ? (rvData!['extraColor'] as num).toInt()
+                    : null,
+                rvExtraUv: rvData?['extraUv'] is List &&
+                        (rvData!['extraUv'] as List).length == 2
+                    ? Offset(
+                        ((rvData['extraUv'] as List)[0] as num).toDouble(),
+                        ((rvData['extraUv'] as List)[1] as num).toDouble(),
+                      )
+                    : null,
+                rvEnvironmentColor: rvData?['environmentColor'] is num
+                    ? (rvData!['environmentColor'] as num).toInt()
+                    : null,
               ),
             );
           case 'mtllib':
@@ -262,6 +391,10 @@ class ModelIo {
         mesh: mesh,
         texturePath: builder.texturePath,
         groupName: builder.groupName,
+        rvCoordinateScale: builder.rvCoordinateScale,
+        rvCoordinateOrigin: builder.rvCoordinateOrigin,
+        rvTextureAnimations: builder.rvTextureAnimations,
+        rvTexturePaths: builder.rvTexturePaths,
       );
     }).toList();
   }
@@ -390,7 +523,7 @@ class ModelIo {
                   ];
             if (faceCount + faceCorners.length > maxFaceCount) {
               throw const FormatException(
-                'Blunder supports up to 50000 faces per scene.',
+                'Blunder supports up to 100000 faces per scene.',
               );
             }
             faceCount += faceCorners.length;
@@ -685,12 +818,30 @@ class ModelIo {
           '$directory${Platform.pathSeparator}$savedTexture',
         );
       }
+      final savedRvTexturePaths = <int, String>{};
+      for (final entry in object.rvTexturePaths.entries) {
+        final source = File(entry.value);
+        if (!await source.exists()) {
+          savedRvTexturePaths[entry.key] = entry.value;
+          continue;
+        }
+        final extension = source.path.split('.').last;
+        final savedName = '${basename}_mesh${index}_rv${entry.key}.$extension';
+        await source.copy(
+          '$directory${Platform.pathSeparator}$savedName',
+        );
+        savedRvTexturePaths[entry.key] = savedName;
+      }
       savedObjects.add(
         ModelMeshData(
           name: object.name,
           mesh: object.mesh,
           texturePath: savedTexture,
           groupName: object.groupName,
+          rvCoordinateScale: object.rvCoordinateScale,
+          rvCoordinateOrigin: object.rvCoordinateOrigin,
+          rvTextureAnimations: object.rvTextureAnimations,
+          rvTexturePaths: savedRvTexturePaths,
         ),
       );
     }
@@ -798,4 +949,9 @@ class _ObjectBuilder {
   String? texturePath;
   String? groupName;
   bool smoothShading = false;
+  double? rvCoordinateScale;
+  Vec3? rvCoordinateOrigin;
+  List<Uint8List> rvTextureAnimations = [];
+  Map<int, String> rvTexturePaths = {};
+  Map<String, dynamic>? pendingRvFace;
 }

@@ -373,6 +373,8 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const BlunderApp());
+    expect(find.text('0 FPS'), findsOneWidget);
+    expect(find.byKey(const ValueKey('fpsCounter')), findsOneWidget);
     expect(find.text('100%'), findsOneWidget);
     expect(tester.getSize(find.byTooltip('Zoom in')).height, lessThan(28));
     await tester.tap(find.byTooltip('Zoom in'));
@@ -582,7 +584,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('About Blunder'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Blunder v1.07'), findsOneWidget);
+    expect(find.textContaining('Blunder v1.08'), findsOneWidget);
     expect(find.textContaining('Prakhar Kumar Yadav'), findsOneWidget);
     expect(find.textContaining('GitHub Copilot'), findsOneWidget);
   });
@@ -631,8 +633,7 @@ void main() {
     expect(find.text('Save As'), findsOneWidget);
     expect(find.text('Export'), findsOneWidget);
     expect(find.text('Exit'), findsOneWidget);
-    expect(find.text('Import .obj…'), findsOneWidget);
-    expect(find.text('Import .obj…'), findsOneWidget);
+    expect(find.text('Import…'), findsOneWidget);
 
     await tester.tap(fileMenu);
     await tester.pumpAndSettle();

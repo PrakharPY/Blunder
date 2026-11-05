@@ -1,17 +1,20 @@
 import 'dart:math' as math;
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import 'mesh.dart';
 import 'model_io.dart';
+import 'rv_io.dart';
 
-const String _appVersion = '1.07';
+const String _appVersion = '1.08';
 
 void main(List<String> args) {
   String? initialPkyPath;
@@ -82,6 +85,11 @@ class _SceneObjectSnapshot {
     required this.textureImage,
     required this.groupName,
     required this.visible,
+    required this.rvCoordinateScale,
+    required this.rvCoordinateOrigin,
+    required this.rvTextureAnimations,
+    required this.rvTextures,
+    required this.rvTexturePaths,
   });
 
   final String name;
@@ -90,6 +98,11 @@ class _SceneObjectSnapshot {
   final ui.Image? textureImage;
   final String? groupName;
   final bool visible;
+  final double? rvCoordinateScale;
+  final Vec3? rvCoordinateOrigin;
+  final List<Uint8List> rvTextureAnimations;
+  final Map<int, ui.Image> rvTextures;
+  final Map<int, String> rvTexturePaths;
 }
 
 class _ViewportSnapshot {
@@ -165,6 +178,11 @@ class SceneObject {
     this.textureImage,
     this.groupName,
     this.visible = true,
+    this.rvCoordinateScale,
+    this.rvCoordinateOrigin,
+    this.rvTextureAnimations = const [],
+    this.rvTextures = const {},
+    this.rvTexturePaths = const {},
   });
 
   String name;
@@ -173,6 +191,11 @@ class SceneObject {
   ui.Image? textureImage;
   String? groupName;
   bool visible;
+  double? rvCoordinateScale;
+  Vec3? rvCoordinateOrigin;
+  List<Uint8List> rvTextureAnimations;
+  Map<int, ui.Image> rvTextures;
+  Map<int, String> rvTexturePaths;
 }
 
 class _ViewBasis {
@@ -206,6 +229,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   int _activeViewportIndex = 0;
   int _visibleViewportCount = 1;
   bool _isSidePanelVisible = true;
+  bool _isRvPanelVisible = true;
   int _activeObjectIndex = 0;
   final Set<int> _selectedMeshIndices = {0};
   MeshModel get _mesh => _objects[_activeObjectIndex].mesh;
@@ -219,6 +243,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
   MeshAxis? _lockedAxis;
   final Set<int> _selectedVertices = {};
   final Set<int> _selectedFaces = {};
+  final Set<int> _rvHighlightedFaces = {};
+  int _rvFlagToSelect = rvFlagInvisible;
   int? _selectedFace = 0;
   final List<int> _stripEdge = [];
   final Map<int, ui.Image> _referenceImages = {};
@@ -264,10 +290,14 @@ class _ModelerScreenState extends State<ModelerScreen> {
   Offset? _scaleStartPointer;
   bool _scaleStartDirty = false;
   static const int _historyLimit = 100;
+  final ValueNotifier<int> _fpsValue = ValueNotifier<int>(0);
+  int _fpsFrameCount = 0;
+  int? _fpsWindowStartMicros;
 
   @override
   void initState() {
     super.initState();
+    SchedulerBinding.instance.addTimingsCallback(_recordFrameTimings);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (Platform.isWindows && kReleaseMode) _registerPkyAssociation();
       final path = widget.initialPkyPath;
@@ -275,16 +305,44 @@ class _ModelerScreenState extends State<ModelerScreen> {
     });
   }
 
+  void _recordFrameTimings(List<FrameTiming> timings) {
+    int? measuredFps;
+    for (final timing in timings) {
+      final timestamp =
+          timing.timestampInMicroseconds(ui.FramePhase.rasterFinish);
+      final start = _fpsWindowStartMicros;
+      if (start == null) {
+        _fpsWindowStartMicros = timestamp;
+        _fpsFrameCount = 1;
+        continue;
+      }
+
+      _fpsFrameCount++;
+      final elapsed = timestamp - start;
+      if (elapsed >= Duration.microsecondsPerSecond) {
+        measuredFps =
+            (_fpsFrameCount * Duration.microsecondsPerSecond / elapsed).round();
+        _fpsWindowStartMicros = timestamp;
+        _fpsFrameCount = 0;
+      }
+    }
+    if (measuredFps != null) _fpsValue.value = measuredFps;
+  }
+
   @override
   void dispose() {
+    SchedulerBinding.instance.removeTimingsCallback(_recordFrameTimings);
+    _fpsValue.dispose();
     final images = <ui.Image>{
       ..._referenceImages.values,
       for (final object in _objects)
         if (object.textureImage != null) object.textureImage!,
+      for (final object in _objects) ...object.rvTextures.values,
       for (final snapshot in [..._undoHistory, ..._redoHistory]) ...[
         ...snapshot.referenceImages.values,
         for (final object in snapshot.objects)
           if (object.textureImage != null) object.textureImage!,
+        for (final object in snapshot.objects) ...object.rvTextures.values,
       ],
     };
     for (final image in images) {
@@ -344,7 +402,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       (count, object) => count + object.mesh.faces.length,
     );
     if (total + additionalFaces <= ModelIo.maxFaceCount) return true;
-    _showMessage('A scene can contain at most 50,000 faces.');
+    _showMessage('A scene can contain at most 100,000 faces.');
     return false;
   }
 
@@ -359,7 +417,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                 0, (total, object) => total + object.mesh.faces.length) +
             mesh.faces.length >
         ModelIo.maxFaceCount) {
-      _showMessage('A scene can contain at most 50,000 faces.');
+      _showMessage('A scene can contain at most 100,000 faces.');
       return;
     }
     _recordUndo();
@@ -375,6 +433,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         ..add(_activeObjectIndex);
       _selectedVertices.clear();
       _selectedFaces.clear();
+      _rvHighlightedFaces.clear();
       _selectedFace = mesh.faces.isEmpty ? null : 0;
       _tool = ActiveTool.select;
       _lockedAxis = null;
@@ -477,6 +536,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       if (changedActive) {
         _selectedVertices.clear();
         _selectedFaces.clear();
+        _rvHighlightedFaces.clear();
         _selectedFace = _mesh.faces.isEmpty ? null : 0;
       }
       if (toggle) {
@@ -490,6 +550,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         if (!changedActive) {
           _selectedVertices.clear();
           _selectedFaces.clear();
+          _rvHighlightedFaces.clear();
           _selectedFace = _mesh.faces.isEmpty ? null : 0;
         }
         _tool = ActiveTool.select;
@@ -574,6 +635,21 @@ class _ModelerScreenState extends State<ModelerScreen> {
             merged,
             texturePath: sameTexture ? texturePath : null,
             textureImage: sameTexture ? sources.first.textureImage : null,
+            rvCoordinateScale: sources.every(
+              (object) =>
+                  object.rvCoordinateScale == sources.first.rvCoordinateScale,
+            )
+                ? sources.first.rvCoordinateScale
+                : null,
+            rvCoordinateOrigin: sources.every(
+              (object) =>
+                  object.rvCoordinateOrigin == sources.first.rvCoordinateOrigin,
+            )
+                ? sources.first.rvCoordinateOrigin
+                : null,
+            rvTextureAnimations: sources.first.rvTextureAnimations,
+            rvTextures: Map.of(sources.first.rvTextures),
+            rvTexturePaths: Map.of(sources.first.rvTexturePaths),
           ),
         );
       _activeObjectIndex = mergedIndex;
@@ -582,6 +658,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         ..add(mergedIndex);
       _selectedVertices.clear();
       _selectedFaces.clear();
+      _rvHighlightedFaces.clear();
       _selectedFace = merged.faces.isEmpty ? null : 0;
       _mode = EditMode.vertex;
       _isDirty = true;
@@ -620,7 +697,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   MeshModel _copyMesh(MeshModel mesh) => MeshModel.fromData(
         mesh.vertices.map((vertex) => vertex.position),
-        mesh.faces.map((face) => MeshFace(face.vertices, face.uv)),
+        mesh.faces.map(MeshFace.copyOf),
         smoothShading: mesh.smoothShading,
       );
 
@@ -634,6 +711,14 @@ class _ModelerScreenState extends State<ModelerScreen> {
               textureImage: object.textureImage,
               groupName: object.groupName,
               visible: object.visible,
+              rvCoordinateScale: object.rvCoordinateScale,
+              rvCoordinateOrigin: object.rvCoordinateOrigin,
+              rvTextureAnimations: [
+                for (final animation in object.rvTextureAnimations)
+                  Uint8List.fromList(animation),
+              ],
+              rvTextures: Map.of(object.rvTextures),
+              rvTexturePaths: Map.of(object.rvTexturePaths),
             ),
         ],
         viewports: [
@@ -681,6 +766,14 @@ class _ModelerScreenState extends State<ModelerScreen> {
               textureImage: object.textureImage,
               groupName: object.groupName,
               visible: object.visible,
+              rvCoordinateScale: object.rvCoordinateScale,
+              rvCoordinateOrigin: object.rvCoordinateOrigin,
+              rvTextureAnimations: [
+                for (final animation in object.rvTextureAnimations)
+                  Uint8List.fromList(animation),
+              ],
+              rvTextures: Map.of(object.rvTextures),
+              rvTexturePaths: Map.of(object.rvTexturePaths),
             ),
         ]);
       for (var index = 0; index < _viewports.length; index++) {
@@ -709,6 +802,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _selectedFaces
         ..clear()
         ..addAll(snapshot.selectedFaces);
+      _rvHighlightedFaces.clear();
       _selectedFace = snapshot.selectedFace;
       _referenceImages
         ..clear()
@@ -1487,7 +1581,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         return KeyEventResult.handled;
       }
       if (key == LogicalKeyboardKey.keyE) {
-        _exportObj();
+        _exportModel();
         return KeyEventResult.handled;
       }
     }
@@ -2329,6 +2423,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
           texturePath: source.texturePath,
           textureImage: image,
           groupName: source.groupName,
+          rvCoordinateScale: source.rvCoordinateScale,
+          rvCoordinateOrigin: source.rvCoordinateOrigin,
+          rvTextureAnimations: source.rvTextureAnimations,
+          rvTextures: Map.of(source.rvTextures),
         ),
       );
       _activeObjectIndex = _objects.length - 1;
@@ -2435,6 +2533,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
     if (_mode == EditMode.vertex) {
       final hit = _nearestVertex(point, size, viewport);
       setState(() {
+        _rvHighlightedFaces.clear();
         if (hit != null) {
           if (!_selectedVertices.add(hit)) _selectedVertices.remove(hit);
         } else {
@@ -2444,6 +2543,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
     } else {
       final hit = _hitFace(point, size, viewport);
       setState(() {
+        _rvHighlightedFaces.clear();
         if (hit == null) {
           _selectedFace = null;
           _selectedFaces.clear();
@@ -2542,9 +2642,74 @@ class _ModelerScreenState extends State<ModelerScreen> {
           mesh: object.mesh,
           texturePath: object.texturePath,
           groupName: object.groupName,
+          rvCoordinateScale: object.rvCoordinateScale,
+          rvCoordinateOrigin: object.rvCoordinateOrigin,
+          rvTextureAnimations: object.rvTextureAnimations,
+          rvTexturePaths: object.rvTexturePaths,
         ),
       )
       .toList();
+
+  List<int> get _selectedRvFaces {
+    final selected = _selectedFaces.isNotEmpty
+        ? _selectedFaces
+        : (_selectedFace == null ? const <int>{} : {_selectedFace!});
+    return selected
+        .where((index) => index >= 0 && index < _mesh.faces.length)
+        .toList();
+  }
+
+  void _applyRvFlag(int flag, {bool clear = false}) {
+    final faceIndices = _selectedRvFaces;
+    if (faceIndices.isEmpty) {
+      _showMessage('Select one or more faces first.');
+      return;
+    }
+    _recordUndo();
+    setState(() {
+      for (final index in faceIndices) {
+        final face = _mesh.faces[index];
+        var rvType = clear ? face.rvType & ~flag : face.rvType | flag;
+        if (!clear && flag == rvFlagEnvMap) {
+          rvType &= ~rvFlagNoEnvMap;
+        } else if (!clear && flag == rvFlagNoEnvMap) {
+          rvType &= ~rvFlagEnvMap;
+        }
+        _mesh.faces[index] = MeshFace.copyOf(
+          face,
+          rvType: rvType,
+        );
+      }
+      _rvHighlightedFaces.clear();
+      _isDirty = true;
+    });
+  }
+
+  void _selectRvFacesWithFlag() {
+    final matches = <int>{
+      for (var index = 0; index < _mesh.faces.length; index++)
+        if ((_mesh.faces[index].rvType & _rvFlagToSelect) != 0) index,
+    };
+    setState(() {
+      _rvHighlightedFaces
+        ..clear()
+        ..addAll(matches);
+      _mode = EditMode.face;
+      _selectedFaces.clear();
+      _selectedFace = null;
+    });
+    if (matches.isEmpty) _showMessage('No faces use the selected RV flag.');
+  }
+
+  static const List<(String, int)> _rvFaceFlags = [
+    ('Invisible', rvFlagInvisible),
+    ('Mirroring', rvFlagMirror),
+    ('No EnvMap', rvFlagNoEnvMap),
+    ('Double-Sided', rvFlagDoubleSided),
+    ('Add Blending', rvFlagAddBlending),
+    ('EnvMap', rvFlagEnvMap),
+    ('Translucent', rvFlagTranslucent),
+  ];
 
   Future<void> _saveScene({bool saveAs = false}) async {
     if (_isSaving) return;
@@ -2578,23 +2743,52 @@ class _ModelerScreenState extends State<ModelerScreen> {
     }
   }
 
-  Future<void> _exportObj() async {
+  Future<void> _exportModel() async {
     final location = await getSaveLocation(
       acceptedTypeGroups: const [
         XTypeGroup(label: 'Wavefront OBJ (*.obj)', extensions: ['obj']),
+        XTypeGroup(label: 'RV model (*.prm)', extensions: ['prm']),
+        XTypeGroup(label: 'RV world (*.w)', extensions: ['w']),
       ],
       suggestedName: 'Blunder_Export.obj',
       confirmButtonText: 'Export',
     );
     if (location == null) return;
-    final path = location.path.toLowerCase().endsWith('.obj')
+    final extension = location.path.split('.').last.toLowerCase();
+    final supportedExtension =
+        {'obj', 'prm', 'w'}.contains(extension) ? extension : 'obj';
+    final path = location.path.toLowerCase().endsWith('.$supportedExtension')
         ? location.path
-        : '${location.path}.obj';
+        : '${location.path}.$supportedExtension';
     try {
-      await ModelIo.writeObj(path, _documentData());
+      if (supportedExtension == 'obj') {
+        await ModelIo.writeObj(path, _documentData());
+      } else {
+        final meshes = [
+          for (final object in _objects)
+            RvExportMesh(
+              mesh: object.mesh,
+              coordinateScale: object.rvCoordinateScale ?? 0.01,
+              coordinateOrigin:
+                  object.rvCoordinateOrigin ?? const Vec3(0, 0, 0),
+            ),
+        ];
+        final bytes = supportedExtension == 'prm'
+            ? RvModelIo.encodePrm(meshes)
+            : RvModelIo.encodeWorld(
+                meshes,
+                textureAnimations: _objects
+                    .firstWhere(
+                      (object) => object.rvTextureAnimations.isNotEmpty,
+                      orElse: () => _objects.first,
+                    )
+                    .rvTextureAnimations,
+              );
+        await File(path).writeAsBytes(bytes, flush: true);
+      }
       if (mounted) _showMessage('Exported ${File(path).uri.pathSegments.last}');
     } catch (error) {
-      if (mounted) _showMessage('Could not export OBJ: $error');
+      if (mounted) _showMessage('Could not export model: $error');
     }
   }
 
@@ -2610,18 +2804,28 @@ class _ModelerScreenState extends State<ModelerScreen> {
     await _loadScenePath(file.path);
   }
 
-  Future<void> _importObj() async {
+  Future<void> _importFile() async {
     final file = await openFile(
       acceptedTypeGroups: const [
         XTypeGroup(label: 'Wavefront OBJ', extensions: ['obj']),
+        XTypeGroup(label: 'RV (*.prm)', extensions: ['prm']),
+        XTypeGroup(label: 'RV (*.w)', extensions: ['w']),
       ],
       confirmButtonText: 'Import',
     );
     if (file == null) return;
+    final extension = file.path.split('.').last.toLowerCase();
+    if (extension == 'prm' || extension == 'w') {
+      await _importRv(file.path, extension);
+      return;
+    }
+    await _importObj(file.path);
+  }
 
+  Future<void> _importObj(String path) async {
     final loadedObjects = <SceneObject>[];
     try {
-      final imported = await ModelIo.readObj(file.path);
+      final imported = await ModelIo.readObj(path);
       final importedFaceCount = imported.fold<int>(
         0,
         (count, object) => count + object.mesh.faces.length,
@@ -2639,6 +2843,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         groupName = '${baseGroup}_$suffix';
         suffix++;
       }
+
       var unavailableTextures = 0;
       for (final object in imported) {
         final texturePath = object.texturePath;
@@ -2699,7 +2904,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       });
       _showMessage(
         unavailableTextures == 0
-            ? 'Imported ${File(file.path).uri.pathSegments.last}'
+            ? 'Imported ${File(path).uri.pathSegments.last}'
             : 'Imported OBJ; $unavailableTextures texture(s) could not be loaded.',
       );
     } catch (error) {
@@ -2710,10 +2915,194 @@ class _ModelerScreenState extends State<ModelerScreen> {
     }
   }
 
+  Future<void> _importRv(String path, String extension) async {
+    final loadTextures = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Import RV model'),
+        content:
+            const Text('Load matching texture files from the same folder?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Skip textures'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Load textures'),
+          ),
+        ],
+      ),
+    );
+    if (loadTextures == null) return;
+    late final RvImportResult imported;
+    try {
+      imported = extension == 'prm'
+          ? await RvModelIo.readPrm(path)
+          : await RvModelIo.readWorld(path);
+    } catch (error) {
+      if (mounted) _showMessage('Could not import RV file: $error');
+      return;
+    }
+    final importedFaceCount = imported.meshes.fold<int>(
+      0,
+      (count, item) => count + item.mesh.faces.length,
+    );
+    if (!_canAddFaces(importedFaceCount)) return;
+
+    final loadedObjects = <SceneObject>[];
+    final existingNames = _objects.map((object) => object.name).toSet();
+    var loadedTextureCount = 0;
+    var unavailableTextureCount = 0;
+    final loadedTextures = <int, ui.Image>{};
+    final loadedTexturePaths = <int, String>{};
+    try {
+      if (loadTextures) {
+        final textureIndices = imported.meshes
+            .expand((item) => item.mesh.faces)
+            .map((face) => face.rvTextureIndex)
+            .where((index) => index >= 0)
+            .toSet();
+        for (final textureIndex in textureIndices) {
+          final texturePath =
+              await _findRvTexture(path, extension, textureIndex);
+          if (texturePath == null) {
+            unavailableTextureCount++;
+            continue;
+          }
+          try {
+            loadedTextures[textureIndex] =
+                await _decodeImage(await File(texturePath).readAsBytes());
+            loadedTexturePaths[textureIndex] = texturePath;
+            loadedTextureCount++;
+          } on Exception {
+            unavailableTextureCount++;
+          }
+        }
+      }
+      for (final item in imported.meshes) {
+        var objectName = item.name;
+        var suffix = 2;
+        while (existingNames.contains(objectName)) {
+          objectName = '${item.name}_$suffix';
+          suffix++;
+        }
+        existingNames.add(objectName);
+        loadedObjects.add(
+          SceneObject(
+            objectName,
+            item.mesh,
+            groupName: File(path).uri.pathSegments.last,
+            rvCoordinateScale: item.coordinateScale,
+            rvCoordinateOrigin: item.coordinateOrigin,
+            rvTextureAnimations: item == imported.meshes.first
+                ? imported.textureAnimations
+                : const [],
+            rvTextures: Map.of(loadedTextures),
+            rvTexturePaths: Map.of(loadedTexturePaths),
+          ),
+        );
+      }
+      if (!mounted) {
+        for (final image in loadedTextures.values.toSet()) {
+          image.dispose();
+        }
+        return;
+      }
+      _recordUndo();
+      setState(() {
+        _objects.addAll(loadedObjects);
+        _activeObjectIndex = _objects.length - loadedObjects.length;
+        _selectedMeshIndices
+          ..clear()
+          ..addAll(
+            List.generate(
+              loadedObjects.length,
+              (index) => _activeObjectIndex + index,
+            ),
+          );
+        _selectedVertices.clear();
+        _selectedFaces.clear();
+        _rvHighlightedFaces.clear();
+        _selectedFace = _mesh.faces.isEmpty ? null : 0;
+        _tool = ActiveTool.select;
+        _lockedAxis = null;
+        _isDirty = true;
+      });
+      if (!loadTextures) {
+        _showMessage(
+          'Imported ${File(path).uri.pathSegments.last}; textures skipped.',
+        );
+      } else if (loadedTextureCount == 0) {
+        _showMessage('No texture data. Please add manually');
+      } else {
+        _showMessage(
+          'Imported ${File(path).uri.pathSegments.last} with '
+          '$loadedTextureCount texture(s)'
+          '${unavailableTextureCount == 0 ? '' : '; '
+              '$unavailableTextureCount unavailable'}',
+        );
+      }
+    } catch (error) {
+      for (final image in loadedTextures.values.toSet()) {
+        image.dispose();
+      }
+      if (mounted) _showMessage('Could not import RV file: $error');
+    }
+  }
+
+  Future<String?> _findRvTexture(
+    String sourcePath,
+    String extension,
+    int textureIndex,
+  ) async {
+    final source = File(sourcePath);
+    final directory = source.parent.path;
+    final basename = source.uri.pathSegments.last.replaceFirst(
+      RegExp(r'\.[^.]+$'),
+      '',
+    );
+    final folderName = source.parent.path
+        .split(RegExp(r'[\\/]'))
+        .where((segment) => segment.isNotEmpty)
+        .last;
+    final candidates = extension == 'w'
+        ? [
+            '$directory${Platform.pathSeparator}'
+                '$basename${_rvTextureSuffix(textureIndex)}.bmp',
+            '$directory${Platform.pathSeparator}'
+                '$basename${_rvTextureSuffix(textureIndex)}.png',
+          ]
+        : [
+            '$directory${Platform.pathSeparator}$basename.bmp',
+            '$directory${Platform.pathSeparator}car.bmp',
+            '$directory${Platform.pathSeparator}'
+                '$folderName.bmp',
+          ];
+    for (final candidate in candidates) {
+      if (await File(candidate).exists()) return candidate;
+    }
+    return null;
+  }
+
+  String _rvTextureSuffix(int index) {
+    if (index < 0) return '';
+    var value = index + 1;
+    var suffix = '';
+    while (value > 0) {
+      value--;
+      suffix = String.fromCharCode(97 + value % 26) + suffix;
+      value ~/= 26;
+    }
+    return suffix;
+  }
+
   Future<void> _loadScenePath(String path) async {
     try {
       final imported = await ModelIo.readPky(path);
       final loadedObjects = <SceneObject>[];
+      final rvTextureImageCache = <String, ui.Image>{};
+      var missingRvTextures = 0;
       for (final object in imported) {
         var texturePath = object.texturePath;
         if (texturePath != null && !File(texturePath).isAbsolute) {
@@ -2724,6 +3113,25 @@ class _ModelerScreenState extends State<ModelerScreen> {
             texturePath != null && await File(texturePath).exists()
                 ? await _decodeImage(await File(texturePath).readAsBytes())
                 : null;
+        final rvTexturePaths = <int, String>{};
+        final rvTextures = <int, ui.Image>{};
+        for (final entry in object.rvTexturePaths.entries) {
+          var rvTexturePath = entry.value;
+          if (!File(rvTexturePath).isAbsolute) {
+            rvTexturePath = '${File(path).parent.path}${Platform.pathSeparator}'
+                '${rvTexturePath.replaceAll(RegExp(r'[\\/]'), Platform.pathSeparator)}';
+          }
+          if (!await File(rvTexturePath).exists()) {
+            missingRvTextures++;
+            continue;
+          }
+          if (!rvTextureImageCache.containsKey(rvTexturePath)) {
+            rvTextureImageCache[rvTexturePath] =
+                await _decodeImage(await File(rvTexturePath).readAsBytes());
+          }
+          rvTextures[entry.key] = rvTextureImageCache[rvTexturePath]!;
+          rvTexturePaths[entry.key] = rvTexturePath;
+        }
         loadedObjects.add(
           SceneObject(
             object.name,
@@ -2731,6 +3139,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
             texturePath: texturePath,
             textureImage: textureImage,
             groupName: object.groupName,
+            rvCoordinateScale: object.rvCoordinateScale,
+            rvCoordinateOrigin: object.rvCoordinateOrigin,
+            rvTextureAnimations: object.rvTextureAnimations,
+            rvTextures: rvTextures,
+            rvTexturePaths: rvTexturePaths,
           ),
         );
       }
@@ -2738,6 +3151,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _redoHistory.clear();
       for (final object in _objects) {
         object.textureImage?.dispose();
+        for (final image in object.rvTextures.values) {
+          image.dispose();
+        }
       }
       setState(() {
         _objects
@@ -2752,6 +3168,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ..add(0);
         _selectedVertices.clear();
         _selectedFaces.clear();
+        _rvHighlightedFaces.clear();
         _selectedFace = _mesh.faces.isEmpty ? null : 0;
         _tool = ActiveTool.select;
         _lockedAxis = null;
@@ -2759,7 +3176,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
         _isDirty = false;
         _page = EditorPage.model;
       });
-      _showMessage('Opened ${File(path).uri.pathSegments.last}');
+      _showMessage(
+        missingRvTextures == 0
+            ? 'Opened ${File(path).uri.pathSegments.last}'
+            : 'Opened scene; $missingRvTextures RV texture(s) are missing.',
+      );
     } catch (error) {
       _showMessage('Could not open scene file: $error');
     }
@@ -2802,6 +3223,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
     _redoHistory.clear();
     for (final object in _objects) {
       object.textureImage?.dispose();
+      for (final image in object.rvTextures.values) {
+        image.dispose();
+      }
     }
     setState(() {
       _objects
@@ -2813,6 +3237,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         ..add(0);
       _selectedVertices.clear();
       _selectedFaces.clear();
+      _rvHighlightedFaces.clear();
       _selectedFace = 0;
       _tool = ActiveTool.select;
       _lockedAxis = null;
@@ -2846,6 +3271,13 @@ class _ModelerScreenState extends State<ModelerScreen> {
       setState(() {
         object.texturePath = file.path;
         object.textureImage = image;
+        if (object.rvCoordinateScale != null) {
+          for (final faceIndex in _selectedRvFaces) {
+            final textureIndex = object.mesh.faces[faceIndex].rvTextureIndex;
+            object.rvTextures[textureIndex] = image;
+            object.rvTexturePaths[textureIndex] = file.path;
+          }
+        }
         _isDirty = true;
       });
     } catch (error) {
@@ -2997,7 +3429,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                           value: 'new', child: Text('New Scene')),
                       const PopupMenuItem(value: 'open', child: Text('Open')),
                       const PopupMenuItem(
-                          value: 'importObj', child: Text('Import .obj…')),
+                          value: 'import', child: Text('Import…')),
                       const PopupMenuDivider(),
                       PopupMenuItem(
                         value: 'save',
@@ -3020,14 +3452,14 @@ class _ModelerScreenState extends State<ModelerScreen> {
                           _newScene();
                         case 'open':
                           _openScene();
-                        case 'importObj':
-                          _importObj();
+                        case 'import':
+                          _importFile();
                         case 'save':
                           _saveScene();
                         case 'saveAs':
                           _saveScene(saveAs: true);
                         case 'export':
-                          _exportObj();
+                          _exportModel();
                         case 'exit':
                           _exitApplication();
                       }
@@ -3230,6 +3662,15 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     margin: const EdgeInsets.symmetric(horizontal: 3),
                   ),
                   _buildHistoryButtons(),
+                  if (!wide &&
+                      _objects.any(
+                        (object) => object.rvCoordinateScale != null,
+                      ))
+                    _compactTool(
+                      label: 'RV face flags',
+                      icon: Icons.flag_outlined,
+                      onPressed: _showRvPanelSheet,
+                    ),
                   _compactTool(
                     label: _mesh.smoothShading
                         ? 'Switch to flat shading'
@@ -3709,8 +4150,33 @@ class _ModelerScreenState extends State<ModelerScreen> {
       _page == EditorPage.model ? _buildViewportWorkspace() : _buildUvEditor();
 
   Widget _buildWideWorkspace() {
+    final hasRvMeshes =
+        _objects.any((object) => object.rvCoordinateScale != null);
     return Row(
       children: [
+        if (hasRvMeshes) ...[
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            width: _isRvPanelVisible ? 220 : 36,
+            child: _isRvPanelVisible
+                ? _buildRvPanel()
+                : Align(
+                    alignment: Alignment.topLeft,
+                    child: IconButton(
+                      tooltip: 'Show RV panel',
+                      onPressed: () => setState(() => _isRvPanelVisible = true),
+                      icon: const Icon(Icons.add),
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 8),
+        ],
+        Expanded(
+          child: _page == EditorPage.model
+              ? _buildViewportWorkspace()
+              : _buildUvEditor(),
+        ),
+        const SizedBox(width: 8),
         AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeInOut,
@@ -3743,13 +4209,193 @@ class _ModelerScreenState extends State<ModelerScreen> {
             ),
           ),
         ),
-        SizedBox(width: _isSidePanelVisible ? 12 : 6),
-        Expanded(
-          child: _page == EditorPage.model
-              ? _buildViewportWorkspace()
-              : _buildUvEditor(),
-        ),
       ],
+    );
+  }
+
+  Widget _buildRvPanel() {
+    final selectedFaces = _selectedRvFaces;
+    return Container(
+      decoration: _panelDecoration(),
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'RV',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Hide RV panel',
+                visualDensity: VisualDensity.compact,
+                constraints:
+                    const BoxConstraints.tightFor(width: 28, height: 28),
+                padding: EdgeInsets.zero,
+                onPressed: () => setState(() => _isRvPanelVisible = false),
+                icon: const Icon(Icons.chevron_left, size: 19),
+              ),
+            ],
+          ),
+          const Divider(height: 16),
+          const Text(
+            'ACTIVE FACE',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 11,
+              letterSpacing: 1,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                for (final (label, flag) in _rvFaceFlags)
+                  _rvFlagButton(
+                    label,
+                    flag,
+                    enabled: selectedFaces.isNotEmpty,
+                  ),
+                const Divider(height: 18),
+                const Text(
+                  'APPLY FLAG',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    letterSpacing: 1,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<int>(
+                  initialValue: _rvFlagToSelect,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final (label, flag) in _rvFaceFlags)
+                      DropdownMenuItem(value: flag, child: Text(label)),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setState(() => _rvFlagToSelect = value);
+                    }
+                  },
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 4,
+                  runSpacing: 4,
+                  alignment: WrapAlignment.spaceBetween,
+                  children: [
+                    TextButton(
+                      onPressed: _selectRvFacesWithFlag,
+                      child: const Text('Select'),
+                    ),
+                    TextButton(
+                      onPressed: () => _applyRvFlag(_rvFlagToSelect),
+                      child: const Text('Apply'),
+                    ),
+                    TextButton(
+                      onPressed: () =>
+                          _applyRvFlag(_rvFlagToSelect, clear: true),
+                      child: const Text('Clear'),
+                    ),
+                  ],
+                ),
+                if (_mesh.faces.isNotEmpty &&
+                    _mesh.faces.any((face) => face.rvType != 0)) ...[
+                  const Divider(height: 18),
+                  Text(
+                    '${_mesh.faces.where((face) => face.rvType != 0).length} faces with RV flags',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showRvPanelSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF171B23),
+      builder: (context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.72,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: _buildRvPanel(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _rvFlagButton(
+    String label,
+    int flag, {
+    required bool enabled,
+  }) {
+    final active = enabled &&
+        _selectedRvFaces
+            .every((index) => (_mesh.faces[index].rvType & flag) != 0);
+    final blendingReady = flag != rvFlagAddBlending ||
+        _selectedRvFaces.every((index) {
+          final type = _mesh.faces[index].rvType;
+          const otherFlags = rvFlagInvisible |
+              rvFlagMirror |
+              rvFlagNoEnvMap |
+              rvFlagDoubleSided |
+              rvFlagEnvMap |
+              rvFlagTranslucent;
+          return type & (otherFlags | rvFlagAddBlending) != 0;
+        });
+    final isEnabled = enabled && blendingReady;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: OutlinedButton(
+        onPressed: isEnabled ? () => _applyRvFlag(flag, clear: active) : null,
+        style: OutlinedButton.styleFrom(
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+          side: BorderSide(
+            color: active ? const Color(0xFF6CA8FF) : const Color(0xFF414B5A),
+          ),
+          backgroundColor:
+              active ? const Color(0x332D6DB5) : Colors.transparent,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              active ? Icons.check_box : Icons.check_box_outline_blank,
+              size: 16,
+              color: active ? const Color(0xFF8FC2FF) : Colors.white54,
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(label, style: const TextStyle(fontSize: 12))),
+          ],
+        ),
+      ),
     );
   }
 
@@ -4284,10 +4930,14 @@ class _ModelerScreenState extends State<ModelerScreen> {
                         textures: _objects
                             .map((object) => object.textureImage)
                             .toList(),
+                        rvTextures: [
+                          for (final object in _objects) object.rvTextures,
+                        ],
                         activeMeshIndex: _activeObjectIndex,
                         selectedVertices: _selectedVertices,
                         selectedFaces: _selectedFaces,
                         selectedFace: _selectedFace,
+                        highlightedFaces: _rvHighlightedFaces,
                         project: (point) => _project(point, size, viewport),
                         basis: _viewBasis(viewport),
                         viewPreset: viewport.preset,
@@ -4348,6 +4998,40 @@ class _ModelerScreenState extends State<ModelerScreen> {
                             ),
                       ),
                     ),
+                    if (viewportIndex == 0)
+                      Positioned(
+                        key: const ValueKey('fpsCounter'),
+                        right: 12,
+                        top: 10,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: const Color(0xAA171B23),
+                            border: Border.all(
+                              color: const Color(0xFF48505E),
+                            ),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            child: ValueListenableBuilder<int>(
+                              valueListenable: _fpsValue,
+                              builder: (context, fps, _) => Text(
+                                '$fps FPS',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelSmall
+                                    ?.copyWith(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     Positioned(
                       right: 8,
                       top: 48,
@@ -4535,7 +5219,13 @@ class _ModelerScreenState extends State<ModelerScreen> {
                                     _uvSelectionStart!,
                                     _uvSelectionEnd!,
                                   ),
-                        texture: _objects[_activeObjectIndex].textureImage,
+                        texture: _selectedFace != null &&
+                                _selectedFace! >= 0 &&
+                                _selectedFace! < _mesh.faces.length
+                            ? _objects[_activeObjectIndex].rvTextures[_mesh
+                                    .faces[_selectedFace!].rvTextureIndex] ??
+                                _objects[_activeObjectIndex].textureImage
+                            : _objects[_activeObjectIndex].textureImage,
                       ),
                     ),
                   ),
@@ -4711,15 +5401,92 @@ class _BottomNavButton extends StatelessWidget {
   }
 }
 
+class _DepthSortedFaces {
+  _DepthSortedFaces(
+    List<MeshModel> meshes,
+    List<bool> visibleMeshes,
+    _ViewBasis basis,
+  ) {
+    var minimumDepth = double.infinity;
+    var maximumDepth = double.negativeInfinity;
+    var count = 0;
+    for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
+      if (!visibleMeshes[meshIndex]) continue;
+      final mesh = meshes[meshIndex];
+      count += mesh.faces.length;
+      for (final vertex in mesh.vertices) {
+        final position = vertex.position;
+        final depth = position.x * basis.normal.x +
+            position.y * basis.normal.y +
+            position.z * basis.normal.z;
+        minimumDepth = math.min(minimumDepth, depth);
+        maximumDepth = math.max(maximumDepth, depth);
+      }
+    }
+
+    meshIndices = Int32List(count);
+    faceIndices = Int32List(count);
+    nextIndices = Int32List(count);
+    bucketHeads = Int32List(_bucketCount)..fillRange(0, _bucketCount, -1);
+    var entryIndex = 0;
+    final depthRange = maximumDepth - minimumDepth;
+    for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
+      if (!visibleMeshes[meshIndex]) continue;
+      final mesh = meshes[meshIndex];
+      for (var faceIndex = 0; faceIndex < mesh.faces.length; faceIndex++) {
+        final vertices = mesh.faces[faceIndex].vertices;
+        var depth = 0.0;
+        for (final vertexIndex in vertices) {
+          final position = mesh.vertices[vertexIndex].position;
+          depth += position.x * basis.normal.x +
+              position.y * basis.normal.y +
+              position.z * basis.normal.z;
+        }
+        depth /= vertices.length;
+        final bucket = depthRange <= 1e-12
+            ? 0
+            : ((depth - minimumDepth) / depthRange * _lastBucket)
+                .toInt()
+                .clamp(0, _lastBucket);
+        meshIndices[entryIndex] = meshIndex;
+        faceIndices[entryIndex] = faceIndex;
+        nextIndices[entryIndex] = bucketHeads[bucket];
+        bucketHeads[bucket] = entryIndex;
+        entryIndex++;
+      }
+    }
+  }
+
+  static const int _bucketCount = 16384;
+  static const int _lastBucket = _bucketCount - 1;
+
+  late final Int32List meshIndices;
+  late final Int32List faceIndices;
+  late final Int32List nextIndices;
+  late final Int32List bucketHeads;
+
+  void forEach(void Function(int meshIndex, int faceIndex) action) {
+    for (final head in bucketHeads) {
+      var index = head;
+      while (index >= 0) {
+        action(meshIndices[index], faceIndices[index]);
+        index = nextIndices[index];
+      }
+    }
+  }
+}
+
 class _ViewportPainter extends CustomPainter {
   _ViewportPainter({
     required this.meshes,
     required this.visibleMeshes,
     required this.textures,
+    required this.rvTextures,
     required this.activeMeshIndex,
     required this.selectedVertices,
     required this.selectedFaces,
     required this.selectedFace,
+    required this.highlightedFaces,
     required this.project,
     required this.basis,
     required this.viewPreset,
@@ -4735,10 +5502,12 @@ class _ViewportPainter extends CustomPainter {
   final List<MeshModel> meshes;
   final List<bool> visibleMeshes;
   final List<ui.Image?> textures;
+  final List<Map<int, ui.Image>> rvTextures;
   final int activeMeshIndex;
   final Set<int> selectedVertices;
   final Set<int> selectedFaces;
   final int? selectedFace;
+  final Set<int> highlightedFaces;
   final Offset Function(Vec3 point) project;
   final _ViewBasis basis;
   final ViewPreset viewPreset;
@@ -4749,9 +5518,6 @@ class _ViewportPainter extends CustomPainter {
   final ViewStyle viewStyle;
   final double fade;
   final bool showVertices;
-
-  double _dot(Vec3 first, Vec3 second) =>
-      first.x * second.x + first.y * second.y + first.z * second.z;
 
   Vec3 _faceNormal(MeshModel mesh, MeshFace face) {
     if (face.vertices.length < 3) return const Vec3(0, 0, 1);
@@ -4800,6 +5566,114 @@ class _ViewportPainter extends CustomPainter {
       (((color >> 8) & 0xFF) * amount).round(),
       ((color & 0xFF) * amount).round(),
     );
+  }
+
+  void _drawSolidFaces(
+    Canvas canvas,
+    List<List<Offset>> projectedMeshes,
+    _DepthSortedFaces faceOrder,
+  ) {
+    final faceNormals = <List<Vec3>>[
+      for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++)
+        if (visibleMeshes[meshIndex])
+          [
+            for (final face in meshes[meshIndex].faces)
+              _faceNormal(meshes[meshIndex], face),
+          ]
+        else
+          const [],
+    ];
+    final vertexNormals = <List<Vec3>>[];
+    for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
+      final mesh = meshes[meshIndex];
+      if (!visibleMeshes[meshIndex] || !mesh.smoothShading) {
+        vertexNormals.add(const []);
+        continue;
+      }
+      final normalSums = List<Vec3>.filled(
+        mesh.vertices.length,
+        const Vec3(0, 0, 0),
+      );
+      for (var faceIndex = 0; faceIndex < mesh.faces.length; faceIndex++) {
+        final normal = faceNormals[meshIndex][faceIndex];
+        for (final vertexIndex in mesh.faces[faceIndex].vertices) {
+          final sum = normalSums[vertexIndex];
+          normalSums[vertexIndex] = Vec3(
+            sum.x + normal.x,
+            sum.y + normal.y,
+            sum.z + normal.z,
+          );
+        }
+      }
+      vertexNormals.add([
+        for (final normal in normalSums) _normalizedNormal(normal),
+      ]);
+    }
+
+    const maxBatchVertices = 65532;
+    const maxBatchIndices = maxBatchVertices * 2;
+    final positions = Float32List(maxBatchVertices * 2);
+    final colors = Int32List(maxBatchVertices);
+    final indices = Uint16List(maxBatchIndices);
+    var vertexCount = 0;
+    var indexCount = 0;
+
+    void flush() {
+      if (indexCount == 0) return;
+      canvas.drawVertices(
+        ui.Vertices.raw(
+          ui.VertexMode.triangles,
+          Float32List.sublistView(positions, 0, vertexCount * 2),
+          colors: Int32List.sublistView(colors, 0, vertexCount),
+          indices: Uint16List.sublistView(indices, 0, indexCount),
+        ),
+        BlendMode.srcOver,
+        Paint(),
+      );
+      vertexCount = 0;
+      indexCount = 0;
+    }
+
+    faceOrder.forEach((meshIndex, faceIndex) {
+      final mesh = meshes[meshIndex];
+      final face = mesh.faces[faceIndex];
+      final corners = face.vertices;
+      final triangleIndexCount = (corners.length - 2) * 3;
+      if (vertexCount + corners.length > maxBatchVertices ||
+          indexCount + triangleIndexCount > maxBatchIndices) {
+        flush();
+      }
+
+      final highlighted =
+          meshIndex == activeMeshIndex && highlightedFaces.contains(faceIndex);
+      final selected = meshIndex == activeMeshIndex &&
+          (selectedFaces.contains(faceIndex) ||
+              (selectedFaces.isEmpty && faceIndex == selectedFace));
+      final base = highlighted
+          ? const Color(0xFF68C9EE).withValues(alpha: fade)
+          : selected
+              ? const Color(0xFFE68186).withValues(alpha: fade)
+              : const Color(0xFF707985).withValues(alpha: fade);
+      final firstVertex = vertexCount;
+      for (var corner = 0; corner < corners.length; corner++) {
+        final vertexIndex = corners[corner];
+        final position = projectedMeshes[meshIndex][vertexIndex];
+        final pointOffset = vertexCount * 2;
+        positions[pointOffset] = position.dx;
+        positions[pointOffset + 1] = position.dy;
+        final normal = mesh.smoothShading
+            ? vertexNormals[meshIndex][vertexIndex]
+            : faceNormals[meshIndex][faceIndex];
+        colors[vertexCount] = _shadeColor(base, _shade(normal)).toARGB32();
+        vertexCount++;
+      }
+      for (var corner = 1; corner < corners.length - 1; corner++) {
+        indices[indexCount++] = firstVertex;
+        indices[indexCount++] = firstVertex + corner;
+        indices[indexCount++] = firstVertex + corner + 1;
+      }
+    });
+    flush();
   }
 
   @override
@@ -4885,132 +5759,125 @@ class _ViewportPainter extends CustomPainter {
       ..strokeWidth = 2.2
       ..style = PaintingStyle.stroke;
     final projectedMeshes = [
-      for (final mesh in meshes)
-        mesh.vertices.map((vertex) => project(vertex.position)).toList(),
+      for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++)
+        if (visibleMeshes[meshIndex])
+          meshes[meshIndex]
+              .vertices
+              .map((vertex) => project(vertex.position))
+              .toList()
+        else
+          const <Offset>[],
     ];
+    final faceOrder = _DepthSortedFaces(meshes, visibleMeshes, basis);
     if (viewStyle == ViewStyle.solid) {
-      for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
-        if (!visibleMeshes[meshIndex]) continue;
-        final mesh = meshes[meshIndex];
-        final faceNormals = [
-          for (final face in mesh.faces) _faceNormal(mesh, face),
-        ];
-        final normalSums = List<Vec3>.filled(
-          mesh.vertices.length,
-          const Vec3(0, 0, 0),
-        );
-        if (mesh.smoothShading) {
-          for (var faceIndex = 0; faceIndex < mesh.faces.length; faceIndex++) {
-            final normal = faceNormals[faceIndex];
-            for (final vertexIndex in mesh.faces[faceIndex].vertices) {
-              final sum = normalSums[vertexIndex];
-              normalSums[vertexIndex] = Vec3(
-                sum.x + normal.x,
-                sum.y + normal.y,
-                sum.z + normal.z,
-              );
-            }
-          }
-        }
-        final vertexNormals = mesh.smoothShading
-            ? [
-                for (final normal in normalSums) _normalizedNormal(normal),
-              ]
-            : const <Vec3>[];
-        final positions = <Offset>[];
-        final colors = <Color>[];
-        for (var faceIndex = 0; faceIndex < mesh.faces.length; faceIndex++) {
-          final face = mesh.faces[faceIndex];
-          final selected = meshIndex == activeMeshIndex &&
-              (selectedFaces.contains(faceIndex) ||
-                  (selectedFaces.isEmpty && faceIndex == selectedFace));
-          final base = selected
-              ? const Color(0xFFE68186).withValues(alpha: fade)
-              : const Color(0xFF707985).withValues(alpha: fade);
-          final corners = face.vertices;
-          for (var corner = 1; corner < corners.length - 1; corner++) {
-            for (final vertexIndex in [
-              corners[0],
-              corners[corner],
-              corners[corner + 1]
-            ]) {
-              final normal = mesh.smoothShading
-                  ? vertexNormals[vertexIndex]
-                  : faceNormals[faceIndex];
-              positions.add(projectedMeshes[meshIndex][vertexIndex]);
-              colors.add(_shadeColor(base, _shade(normal)));
-            }
-          }
-        }
-        if (positions.isNotEmpty) {
-          canvas.drawVertices(
-            ui.Vertices(ui.VertexMode.triangles, positions, colors: colors),
-            BlendMode.srcOver,
-            Paint(),
-          );
-        }
-      }
+      _drawSolidFaces(canvas, projectedMeshes, faceOrder);
     }
 
-    final faceDraws = <(double, int, int, MeshFace)>[];
-    for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
-      if (!visibleMeshes[meshIndex]) continue;
-      final mesh = meshes[meshIndex];
-      for (var faceIndex = 0; faceIndex < mesh.faces.length; faceIndex++) {
-        final selected = meshIndex == activeMeshIndex &&
-            (selectedFaces.contains(faceIndex) ||
-                (selectedFaces.isEmpty && faceIndex == selectedFace));
-        if (viewStyle == ViewStyle.solid && !selected) continue;
-        final face = mesh.faces[faceIndex];
-        final depth = face.vertices
-                .map((index) =>
-                    _dot(mesh.vertices[index].position, basis.normal))
-                .reduce((first, second) => first + second) /
-            face.vertices.length;
-        faceDraws.add((depth, meshIndex, faceIndex, face));
-      }
+    ui.Image? batchTexture;
+    final batchPositions = <Offset>[];
+    final batchTextureCoordinates = <Offset>[];
+    final batchColors = <Color>[];
+    final textureTint = Colors.white.withValues(alpha: fade);
+
+    void flushTexturedBatch() {
+      final texture = batchTexture;
+      if (texture == null || batchPositions.isEmpty) return;
+      _drawTexturedBatch(
+        canvas,
+        texture,
+        batchPositions,
+        batchTextureCoordinates,
+        batchColors,
+      );
+      batchPositions.clear();
+      batchTextureCoordinates.clear();
+      batchColors.clear();
     }
-    if (viewStyle != ViewStyle.solid) {
-      faceDraws.sort((first, second) => first.$1.compareTo(second.$1));
-    }
-    for (final (_, meshIndex, faceIndex, face) in faceDraws) {
+
+    faceOrder.forEach((meshIndex, faceIndex) {
+      final face = meshes[meshIndex].faces[faceIndex];
       final active = meshIndex == activeMeshIndex;
+      final highlighted = active && highlightedFaces.contains(faceIndex);
       final selected = active &&
           (selectedFaces.contains(faceIndex) ||
               (selectedFaces.isEmpty && faceIndex == selectedFace));
+      if (viewStyle == ViewStyle.solid && !selected && !highlighted) return;
       final points = face.vertices
           .map((index) => projectedMeshes[meshIndex][index])
           .toList();
-      final path = Path()..addPolygon(points, true);
       if (viewStyle == ViewStyle.textured) {
-        final texture = textures[meshIndex];
+        final texture =
+            rvTextures[meshIndex][face.rvTextureIndex] ?? textures[meshIndex];
         if (texture != null && face.uv.length == points.length) {
-          _drawTexturedFace(canvas, face, points, texture, fade);
+          if (batchTexture != texture || selected || highlighted) {
+            flushTexturedBatch();
+            batchTexture = texture;
+          }
+          for (var corner = 1; corner < points.length - 1; corner++) {
+            for (final cornerIndex in [0, corner, corner + 1]) {
+              batchPositions.add(points[cornerIndex]);
+              batchTextureCoordinates.add(
+                Offset(
+                  face.uv[cornerIndex].dx * texture.width,
+                  (1 - face.uv[cornerIndex].dy) * texture.height,
+                ),
+              );
+              batchColors.add(textureTint);
+            }
+          }
+          if (selected || highlighted) {
+            flushTexturedBatch();
+            final path = Path()..addPolygon(points, true);
+            canvas.drawPath(
+              path,
+              Paint()
+                ..color = (highlighted
+                        ? const Color(0x6675D9FA)
+                        : const Color(0x66F06B73))
+                    .withValues(alpha: fade),
+            );
+          }
+          if (active && (selected || highlighted)) {
+            flushTexturedBatch();
+            canvas.drawPath(
+              Path()..addPolygon(points, true),
+              Paint()
+                ..color = (highlighted
+                        ? const Color(0xFF75D9FA)
+                        : const Color(0xFFFF8B91))
+                    .withValues(alpha: fade)
+                ..strokeWidth = 2
+                ..style = PaintingStyle.stroke,
+            );
+          }
         } else {
+          flushTexturedBatch();
+          batchTexture = null;
+          final path = Path()..addPolygon(points, true);
           canvas.drawPath(
             path,
             Paint()..color = const Color(0xFF707985).withValues(alpha: fade),
           );
         }
-        if (selected) {
+      } else {
+        final path = Path()..addPolygon(points, true);
+        if (viewStyle == ViewStyle.wireframe) {
+          canvas.drawPath(path, edgePaint);
+        } else if (active && (selected || highlighted)) {
           canvas.drawPath(
             path,
-            Paint()..color = const Color(0x66F06B73).withValues(alpha: fade),
+            Paint()
+              ..color = (highlighted
+                      ? const Color(0xFF75D9FA)
+                      : const Color(0xFFFF8B91))
+                  .withValues(alpha: fade)
+              ..strokeWidth = 2
+              ..style = PaintingStyle.stroke,
           );
         }
       }
-      if (viewStyle == ViewStyle.wireframe) {
-        canvas.drawPath(path, edgePaint);
-      } else if (active && selected) {
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = const Color(0xFFFF8B91).withValues(alpha: fade)
-            ..strokeWidth = 2
-            ..style = PaintingStyle.stroke,
-        );
-      }
-    }
+    });
+    flushTexturedBatch();
 
     if (showVertices) {
       for (var meshIndex = 0; meshIndex < meshes.length; meshIndex++) {
@@ -5063,91 +5930,47 @@ class _ViewportPainter extends CustomPainter {
     }
   }
 
-  void _drawTexturedFace(
+  void _drawTexturedBatch(
     Canvas canvas,
-    MeshFace face,
-    List<Offset> destinationPoints,
     ui.Image image,
-    double opacity,
+    List<Offset> positions,
+    List<Offset> textureCoordinates,
+    List<Color> colors,
   ) {
-    final triangles = [
-      for (var corner = 1; corner < face.vertices.length - 1; corner++)
-        [0, corner, corner + 1],
-    ];
-    for (final triangle in triangles) {
-      final source = triangle
-          .map(
-            (index) => Offset(
-              face.uv[index].dx * image.width,
-              (1 - face.uv[index].dy) * image.height,
-            ),
-          )
-          .toList();
-      final destination =
-          triangle.map((index) => destinationPoints[index]).toList();
-      final transform = _affineTransform(source, destination);
-      if (transform == null) continue;
-      final clip = Path()..addPolygon(destination, true);
-      canvas
-        ..save()
-        ..clipPath(clip)
-        ..transform(transform);
-      canvas.drawImage(
-        image,
-        Offset.zero,
-        Paint()
-          ..color = Colors.white.withValues(alpha: opacity)
-          ..filterQuality = FilterQuality.medium,
-      );
-      canvas.restore();
-    }
-  }
-
-  Float64List? _affineTransform(List<Offset> source, List<Offset> destination) {
-    final x1 = source[0].dx;
-    final y1 = source[0].dy;
-    final x2 = source[1].dx;
-    final y2 = source[1].dy;
-    final x3 = source[2].dx;
-    final y3 = source[2].dy;
-    final determinant = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2);
-    if (determinant.abs() < 1e-10) return null;
-    final u1 = destination[0].dx;
-    final u2 = destination[1].dx;
-    final u3 = destination[2].dx;
-    final v1 = destination[0].dy;
-    final v2 = destination[1].dy;
-    final v3 = destination[2].dy;
-    final a = (u1 * (y2 - y3) + u2 * (y3 - y1) + u3 * (y1 - y2)) / determinant;
-    final c = (u1 * (x3 - x2) + u2 * (x1 - x3) + u3 * (x2 - x1)) / determinant;
-    final tx = (u1 * (x2 * y3 - x3 * y2) +
-            u2 * (x3 * y1 - x1 * y3) +
-            u3 * (x1 * y2 - x2 * y1)) /
-        determinant;
-    final b = (v1 * (y2 - y3) + v2 * (y3 - y1) + v3 * (y1 - y2)) / determinant;
-    final d = (v1 * (x3 - x2) + v2 * (x1 - x3) + v3 * (x2 - x1)) / determinant;
-    final ty = (v1 * (x2 * y3 - x3 * y2) +
-            v2 * (x3 * y1 - x1 * y3) +
-            v3 * (x1 * y2 - x2 * y1)) /
-        determinant;
-    return Float64List.fromList([
-      a,
-      b,
-      0,
-      0,
-      c,
-      d,
-      0,
-      0,
-      0,
-      0,
-      1,
-      0,
-      tx,
-      ty,
-      0,
-      1,
-    ]);
+    final vertices = ui.Vertices(
+      ui.VertexMode.triangles,
+      positions,
+      textureCoordinates: textureCoordinates,
+      colors: colors,
+    );
+    canvas.drawVertices(
+      vertices,
+      BlendMode.modulate,
+      Paint()
+        ..shader = ui.ImageShader(
+          image,
+          TileMode.clamp,
+          TileMode.clamp,
+          Float64List.fromList(const [
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+          ]),
+        ),
+    );
   }
 
   void _drawAxis(Canvas canvas) {

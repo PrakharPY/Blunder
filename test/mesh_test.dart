@@ -179,6 +179,46 @@ void main() {
       expect(mesh.faces.single.uv, hasLength(4));
     });
 
+    test('keeps compatible RV face metadata when merging triangles', () {
+      final mesh = MeshModel.fromData(
+        const [
+          Vec3(0, 0, 0),
+          Vec3(1, 0, 0),
+          Vec3(1, 1, 0),
+          Vec3(0, 1, 0),
+        ],
+        [
+          MeshFace(
+            const [0, 1, 2],
+            const [Offset(0, 0), Offset(1, 0), Offset(1, 1)],
+            rvType: 0x0080,
+            rvTextureIndex: 3,
+            rvColors: const [0xff010101, 0xff020202, 0xff030303],
+            rvEnvironmentColor: 0xffaabbcc,
+          ),
+          MeshFace(
+            const [0, 2, 3],
+            const [Offset(0, 0), Offset(1, 1), Offset(0, 1)],
+            rvType: 0x0080,
+            rvTextureIndex: 3,
+            rvColors: const [0xff010101, 0xff030303, 0xff040404],
+            rvEnvironmentColor: 0xffaabbcc,
+          ),
+        ],
+      );
+
+      expect(mesh.mergeTriangles([0, 1]), isNotNull);
+      expect(mesh.faces.single.rvType, 0x0080);
+      expect(mesh.faces.single.rvTextureIndex, 3);
+      expect(mesh.faces.single.rvEnvironmentColor, 0xffaabbcc);
+      expect(mesh.faces.single.rvColors, [
+        0xff010101,
+        0xff020202,
+        0xff030303,
+        0xff040404,
+      ]);
+    });
+
     test('joins two vertices and removes collapsed faces', () {
       final mesh = MeshModel.fromData(
         const [

@@ -16,16 +16,53 @@ class MeshVertex {
 }
 
 class MeshFace {
-  MeshFace(List<int> vertices, List<Offset> uv)
-      : vertices = List.unmodifiable(vertices),
-        uv = List.of(uv);
+  MeshFace(
+    List<int> vertices,
+    List<Offset> uv, {
+    this.rvType = 0,
+    this.rvTextureIndex = 0,
+    List<int>? rvColors,
+    this.rvExtraColor,
+    this.rvExtraUv,
+    this.rvEnvironmentColor,
+  })  : vertices = List.unmodifiable(vertices),
+        uv = List.of(uv),
+        rvColors = List.of(rvColors ?? const <int>[]);
 
   final List<int> vertices;
   final List<Offset> uv;
+  final int rvType;
+  final int rvTextureIndex;
+  final List<int> rvColors;
+  final int? rvExtraColor;
+  final Offset? rvExtraUv;
+  int? rvEnvironmentColor;
+
+  static MeshFace copyOf(
+    MeshFace face, {
+    List<int>? vertices,
+    List<Offset>? uv,
+    int? rvType,
+    int? rvTextureIndex,
+    List<int>? rvColors,
+    int? rvExtraColor,
+    Offset? rvExtraUv,
+    int? rvEnvironmentColor,
+  }) =>
+      MeshFace(
+        vertices ?? face.vertices,
+        uv ?? face.uv,
+        rvType: rvType ?? face.rvType,
+        rvTextureIndex: rvTextureIndex ?? face.rvTextureIndex,
+        rvColors: rvColors ?? face.rvColors,
+        rvExtraColor: rvExtraColor ?? face.rvExtraColor,
+        rvExtraUv: rvExtraUv ?? face.rvExtraUv,
+        rvEnvironmentColor: rvEnvironmentColor ?? face.rvEnvironmentColor,
+      );
 }
 
 class MeshModel {
-  static const int maxFaceCount = 50000;
+  static const int maxFaceCount = 100000;
 
   MeshModel._(this.vertices, this.faces, {this.smoothShading = false});
 
@@ -52,9 +89,9 @@ class MeshModel {
       joined.vertices.addAll(mesh.vertices);
       joined.faces.addAll(
         mesh.faces.map(
-          (face) => MeshFace(
-            face.vertices.map((index) => index + offset).toList(),
-            face.uv,
+          (face) => MeshFace.copyOf(
+            face,
+            vertices: face.vertices.map((index) => index + offset).toList(),
           ),
         ),
       );
@@ -371,6 +408,7 @@ class MeshModel {
     for (final face in faces) {
       final faceVertices = <int>[];
       final faceUvs = <Offset>[];
+      final faceColors = <int>[];
       for (var corner = 0; corner < face.vertices.length; corner++) {
         var index = face.vertices[corner];
         if (index == remove) {
@@ -381,13 +419,24 @@ class MeshModel {
         if (faceVertices.isNotEmpty && faceVertices.last == index) continue;
         faceVertices.add(index);
         faceUvs.add(face.uv[corner]);
+        if (corner < face.rvColors.length) {
+          faceColors.add(face.rvColors[corner]);
+        }
       }
       if (faceVertices.length > 1 && faceVertices.first == faceVertices.last) {
         faceVertices.removeLast();
         faceUvs.removeLast();
+        if (faceColors.isNotEmpty) faceColors.removeLast();
       }
       if (faceVertices.toSet().length >= 3) {
-        remainingFaces.add(MeshFace(faceVertices, faceUvs));
+        remainingFaces.add(
+          MeshFace.copyOf(
+            face,
+            vertices: faceVertices,
+            uv: faceUvs,
+            rvColors: faceColors,
+          ),
+        );
       }
     }
     vertices.removeAt(remove);
@@ -405,9 +454,11 @@ class MeshModel {
     }
     for (final index in selection) {
       final face = faces[index];
-      faces[index] = MeshFace(
-        face.vertices.reversed.toList(),
-        face.uv.reversed.toList(),
+      faces[index] = MeshFace.copyOf(
+        face,
+        vertices: face.vertices.reversed.toList(),
+        uv: face.uv.reversed.toList(),
+        rvColors: face.rvColors.reversed.toList(),
       );
     }
     return true;
@@ -422,6 +473,11 @@ class MeshModel {
     final first = faces[indices[0]];
     final second = faces[indices[1]];
     if (first.vertices.length != 3 || second.vertices.length != 3) return null;
+    if (first.rvType != second.rvType ||
+        first.rvTextureIndex != second.rvTextureIndex ||
+        first.rvEnvironmentColor != second.rvEnvironmentColor) {
+      return null;
+    }
     final allVertices = {...first.vertices, ...second.vertices};
     if (allVertices.length != 4) return null;
 
@@ -483,11 +539,29 @@ class MeshModel {
         values.map((value) => value.dy).reduce((a, b) => a + b) / values.length,
       );
     }).toList();
+    final colorsByVertex = <int, List<int>>{};
+    for (final face in [first, second]) {
+      for (var corner = 0; corner < face.vertices.length; corner++) {
+        colorsByVertex.putIfAbsent(face.vertices[corner], () => []).add(
+            corner < face.rvColors.length ? face.rvColors[corner] : 0xffffffff);
+      }
+    }
+    final mergedColors =
+        orderedVertices.map((vertex) => colorsByVertex[vertex]!.first).toList();
 
     for (final index in indices.reversed) {
       faces.removeAt(index);
     }
-    faces.add(MeshFace(orderedVertices, mergedUv));
+    faces.add(
+      MeshFace(
+        orderedVertices,
+        mergedUv,
+        rvType: first.rvType,
+        rvTextureIndex: first.rvTextureIndex,
+        rvColors: mergedColors,
+        rvEnvironmentColor: first.rvEnvironmentColor,
+      ),
+    );
     return faces.length - 1;
   }
 
@@ -555,9 +629,11 @@ class MeshModel {
     }
     for (var index = 0; index < faces.length; index++) {
       final face = faces[index];
-      faces[index] = MeshFace(
-        face.vertices.reversed.toList(),
-        face.uv.reversed.toList(),
+      faces[index] = MeshFace.copyOf(
+        face,
+        vertices: face.vertices.reversed.toList(),
+        uv: face.uv.reversed.toList(),
+        rvColors: face.rvColors.reversed.toList(),
       );
     }
     return true;
@@ -572,9 +648,9 @@ class MeshModel {
         face.vertices[i]: duplicatedVertices[i],
     };
     faces.add(
-      MeshFace(
-        face.vertices.map((index) => remapped[index]!).toList(),
-        face.uv,
+      MeshFace.copyOf(
+        face,
+        vertices: face.vertices.map((index) => remapped[index]!).toList(),
       ),
     );
     return faces.length - 1;
@@ -638,9 +714,9 @@ class MeshModel {
     }
     for (var index = 0; index < faces.length; index++) {
       final face = faces[index];
-      faces[index] = MeshFace(
-        face.vertices.map((vertex) => remap[vertex]!).toList(),
-        face.uv,
+      faces[index] = MeshFace.copyOf(
+        face,
+        vertices: face.vertices.map((vertex) => remap[vertex]!).toList(),
       );
     }
     vertices

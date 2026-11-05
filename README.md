@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.07** — Windows and Android polygon modeling build.
+**Version 1.08** — Windows and Android polygon modeling build.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
@@ -140,11 +140,27 @@ flutter test
   pan the grid when no reference image is loaded.
 - Toggle the **Flat / Smooth shading** toolbar button to change the active
   mesh's viewport lighting; the setting is saved in PKY scene files. The
-  viewport batches solid faces and caches projected vertices to keep larger
-  meshes responsive.
-- Blunder enforces a **50,000 face per scene limit** for imported scenes and
+  viewport uses indexed solid-face batches and depth buckets to reduce per-frame
+  sorting and temporary geometry data on larger meshes.
+- Blunder enforces a **100,000 face per scene limit** for imported scenes and
   model edits. OBJ parsing runs off the UI isolate; oversized OBJ/PKY scenes
   are rejected with an explicit limit message.
+- **File → Import** also accepts **RV (*.prm)** and **RV (*.w)** files. RV
+  imports preserve per-face flags, texture indices, UVs, colors, coordinate
+  transforms, and world texture-animation records. Binary mesh decoding runs
+  off the UI isolate, and the textured viewport batches triangles by texture to
+  keep larger imports responsive. Blunder searches beside the source file for
+  matching BMP textures; missing textures can be assigned manually with
+  **Add texture** in the UV editor.
+- RV models and worlds can be exported through **File → Export** by choosing
+  `.prm` or `.w`. The RV panel shows and edits flags on the active face, and its
+  **Apply Flag** controls can select matching faces, apply a flag, or clear it.
+  Selected matches are highlighted light blue. On narrow screens, open these
+  controls with the **RV face flags** toolbar button.
+- PRM import reads the first LOD mesh; export writes one LOD. W export rebuilds
+  bounds and a single big-cube index group from the current scene. PKY projects
+  retain RV flags and coordinate metadata, along with paths to loaded RV
+  textures.
 - Android includes touch buttons for box/select-all, delete, scale, hand pan,
   UV box selection/rotation, and mesh selection/joining alongside the desktop
   menus and gestures.
