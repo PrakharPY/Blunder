@@ -1,7 +1,7 @@
 name: blunder
 description: A lightweight beginner-friendly polygon modeler.
 publish_to: none
-version: 1.8.0+10
+version: 1.9.0+11
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

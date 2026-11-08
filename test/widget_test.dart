@@ -6,6 +6,56 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:blunder/main.dart';
 
 void main() {
+  testWidgets('keeps the Atlas Generator available for every scene',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    expect(find.byKey(const ValueKey('atlasGeneratorPanel')), findsOneWidget);
+    expect(find.text('ATLAS GENERATOR'), findsOneWidget);
+    expect(find.text('Maximum size'), findsOneWidget);
+    expect(find.text('Atlas shape'), findsOneWidget);
+    expect(find.text('Island padding'), findsOneWidget);
+    expect(find.text('Texture density'), findsOneWidget);
+    expect(find.text('Generate'), findsOneWidget);
+  });
+
+  testWidgets('shows selection and viewport tool choices in the dropdown',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Selection and viewport tools'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Box select (B)'), findsOneWidget);
+    expect(find.text('Select all / none (A)'), findsOneWidget);
+    expect(find.text('Select visible meshes'), findsOneWidget);
+    expect(find.text('Join selected meshes'), findsOneWidget);
+  });
+
+  testWidgets('exposes mesh selection and atlas controls on narrow screens',
+      (tester) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    expect(find.byTooltip('Meshes'), findsOneWidget);
+    expect(find.byTooltip('Atlas'), findsOneWidget);
+    await tester.tap(find.byTooltip('Meshes'));
+    await tester.pumpAndSettle();
+    expect(find.text('Select meshes'), findsOneWidget);
+    expect(find.text('Mesh_1'), findsOneWidget);
+  });
+
   testWidgets('opens the model and switches to its UV layout', (tester) async {
     tester.view.physicalSize = const Size(400, 800);
     tester.view.devicePixelRatio = 1;
@@ -17,7 +67,7 @@ void main() {
     expect(find.text('File'), findsOneWidget);
     expect(find.text('Free view · 0 vertices selected'), findsOneWidget);
 
-    await tester.tap(find.text('UVs'));
+    await tester.tap(find.byTooltip('UVs'));
     await tester.pumpAndSettle();
 
     expect(
@@ -375,7 +425,7 @@ void main() {
     await tester.pumpWidget(const BlunderApp());
     expect(find.text('0 FPS'), findsOneWidget);
     expect(find.byKey(const ValueKey('fpsCounter')), findsOneWidget);
-    expect(find.text('100%'), findsOneWidget);
+    expect(find.text('100%'), findsNWidgets(2));
     expect(tester.getSize(find.byTooltip('Zoom in')).height, lessThan(28));
     await tester.tap(find.byTooltip('Zoom in'));
     await tester.pumpAndSettle();
@@ -684,7 +734,7 @@ void main() {
     );
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
     await tester.pumpAndSettle();
-    expect(find.text('100%'), findsOneWidget);
+    expect(find.text('100%'), findsNWidgets(2));
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
     await tester.sendEventToBinding(
@@ -695,7 +745,7 @@ void main() {
     );
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.pumpAndSettle();
-    expect(find.text('100%'), findsOneWidget);
+    expect(find.text('100%'), findsNWidgets(2));
 
     await tester.sendEventToBinding(
       PointerScrollEvent(

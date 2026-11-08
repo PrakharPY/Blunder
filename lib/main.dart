@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
+import 'atlas_generator.dart';
 import 'mesh.dart';
 import 'model_io.dart';
 import 'rv_io.dart';
@@ -230,6 +231,12 @@ class _ModelerScreenState extends State<ModelerScreen> {
   int _visibleViewportCount = 1;
   bool _isSidePanelVisible = true;
   bool _isRvPanelVisible = true;
+  bool _isGeneratingAtlas = false;
+  bool _atlasAutoFit = true;
+  int _atlasMaxSize = 2048;
+  int _atlasPadding = 8;
+  double _atlasDensity = 1;
+  AtlasShape _atlasShape = AtlasShape.square;
   int _activeObjectIndex = 0;
   final Set<int> _selectedMeshIndices = {0};
   MeshModel get _mesh => _objects[_activeObjectIndex].mesh;
@@ -3285,6 +3292,181 @@ class _ModelerScreenState extends State<ModelerScreen> {
     }
   }
 
+  List<int> get _selectedVisibleMeshIndices => _selectedMeshIndices
+      .where((index) => index >= 0 && index < _objects.length)
+      .where((index) => _objects[index].visible)
+      .toList()
+    ..sort();
+
+  int get _selectedAtlasTextureCount {
+    final images = <ui.Image>[];
+    var hasUntexturedFaces = false;
+    for (final meshIndex in _selectedVisibleMeshIndices) {
+      final object = _objects[meshIndex];
+      for (final face in object.mesh.faces) {
+        final image =
+            object.rvTextures[face.rvTextureIndex] ?? object.textureImage;
+        if (image == null) {
+          hasUntexturedFaces = true;
+        } else if (!images.any((existing) => identical(existing, image))) {
+          images.add(image);
+        }
+      }
+    }
+    return images.length + (hasUntexturedFaces ? 1 : 0);
+  }
+
+  Future<void> _generateAtlas() async {
+    final meshIndices = _selectedVisibleMeshIndices;
+    if (meshIndices.isEmpty) {
+      _showMessage('Select one or more visible meshes in the Scene panel.');
+      return;
+    }
+    if (meshIndices.every((index) => _objects[index].mesh.faces.isEmpty)) {
+      _showMessage('The selected meshes do not contain any faces.');
+      return;
+    }
+    final location = await getSaveLocation(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'PNG texture atlas', extensions: ['png']),
+      ],
+      suggestedName: 'Blunder_Atlas.png',
+      confirmButtonText: 'Generate',
+    );
+    if (location == null || !mounted) return;
+    final outputPath = location.path.toLowerCase().endsWith('.png')
+        ? location.path
+        : '${location.path}.png';
+    setState(() => _isGeneratingAtlas = true);
+
+    ui.Image? atlasImage;
+    try {
+      final sourceImages = <ui.Image?>[];
+      final sourceForFaces = <int, List<int>>{};
+
+      int sourceIndex(ui.Image? image) {
+        final existing = sourceImages.indexWhere(
+          (candidate) => identical(candidate, image),
+        );
+        if (existing >= 0) return existing;
+        sourceImages.add(image);
+        return sourceImages.length - 1;
+      }
+
+      for (final meshIndex in meshIndices) {
+        final object = _objects[meshIndex];
+        sourceForFaces[meshIndex] = [
+          for (final face in object.mesh.faces)
+            sourceIndex(
+              object.rvTextures[face.rvTextureIndex] ?? object.textureImage,
+            ),
+        ];
+        if (object.mesh.faces.any(
+          (face) => face.uv.length != face.vertices.length,
+        )) {
+          throw const FormatException(
+            'Every selected face needs one UV coordinate per vertex.',
+          );
+        }
+      }
+
+      final sourceSizes = [
+        for (final image in sourceImages)
+          AtlasTextureSize(image?.width ?? 1, image?.height ?? 1),
+      ];
+      final layout = AtlasPacker.pack(
+        textures: sourceSizes,
+        maxSize: _atlasMaxSize,
+        padding: _atlasPadding,
+        shape: _atlasShape,
+        density: _atlasDensity,
+        autoFit: _atlasAutoFit,
+      );
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder)
+        ..drawColor(Colors.transparent, BlendMode.src);
+      for (var index = 0; index < sourceImages.length; index++) {
+        final image = sourceImages[index];
+        final region = layout.regions[index];
+        final destination = Rect.fromLTWH(
+          region.x.toDouble(),
+          region.y.toDouble(),
+          region.width.toDouble(),
+          region.height.toDouble(),
+        );
+        if (image == null) {
+          canvas.drawRect(destination, Paint()..color = Colors.white);
+        } else {
+          canvas.drawImageRect(
+            image,
+            Rect.fromLTWH(
+              0,
+              0,
+              image.width.toDouble(),
+              image.height.toDouble(),
+            ),
+            destination,
+            Paint()..filterQuality = FilterQuality.high,
+          );
+        }
+      }
+      final picture = recorder.endRecording();
+      atlasImage = await picture.toImage(layout.width, layout.height);
+      picture.dispose();
+      final png = await atlasImage.toByteData(format: ui.ImageByteFormat.png);
+      if (png == null) {
+        throw const FormatException('Could not encode the atlas as PNG.');
+      }
+      await File(outputPath).writeAsBytes(
+        png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+        flush: true,
+      );
+
+      _recordUndo();
+      setState(() {
+        for (final meshIndex in meshIndices) {
+          final object = _objects[meshIndex];
+          final faceSources = sourceForFaces[meshIndex]!;
+          for (var faceIndex = 0;
+              faceIndex < object.mesh.faces.length;
+              faceIndex++) {
+            final face = object.mesh.faces[faceIndex];
+            final sourceIndex = faceSources[faceIndex];
+            object.mesh.faces[faceIndex] = MeshFace.copyOf(
+              face,
+              rvTextureIndex: 0,
+              uv: [
+                for (final uv in face.uv)
+                  AtlasPacker.remapUv(
+                    uv: uv,
+                    source: sourceSizes[sourceIndex],
+                    region: layout.regions[sourceIndex],
+                    atlas: layout,
+                  ),
+              ],
+            );
+          }
+          object
+            ..texturePath = outputPath
+            ..textureImage = atlasImage
+            ..rvTextures = {0: atlasImage!}
+            ..rvTexturePaths = {0: outputPath};
+        }
+        _isDirty = true;
+      });
+      atlasImage = null;
+      _showMessage(
+        'Generated ${layout.width} × ${layout.height} atlas for '
+        '${meshIndices.length} mesh(es) from ${sourceImages.length} texture(s).',
+      );
+    } catch (error) {
+      atlasImage?.dispose();
+      if (mounted) _showMessage('Could not generate texture atlas: $error');
+    } finally {
+      if (mounted) setState(() => _isGeneratingAtlas = false);
+    }
+  }
+
   void _smartUvRemap() {
     _recordUndo();
     final selected = _facesForUvMapping;
@@ -4093,48 +4275,72 @@ class _ModelerScreenState extends State<ModelerScreen> {
     );
   }
 
-  Widget _buildTouchToolsMenu() => PopupMenuButton<String>(
-        tooltip: 'Selection and viewport tools',
-        icon: const Icon(Icons.tune_rounded, size: 18),
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints.tightFor(width: 32, height: 32),
-        onSelected: (tool) {
-          switch (tool) {
-            case 'box':
-              setState(() {
-                _boxSelectActive = !_boxSelectActive;
-                _boxSelectionStart = null;
-                _boxSelectionEnd = null;
-              });
-            case 'all':
-              _toggleSelectAll();
-            case 'delete':
-              _deleteSelection();
-            case 'scale':
-              _showScaleDialog();
-            case 'hand':
-              setState(() {
-                _tool = _tool == ActiveTool.hand
-                    ? ActiveTool.select
-                    : ActiveTool.hand;
-              });
-            case 'visible':
-              _selectVisibleMeshes();
-            case 'join':
-              _joinSelectedMeshes();
-          }
-        },
-        itemBuilder: (context) => const [
-          PopupMenuItem(value: 'box', child: Text('Box select (B)')),
-          PopupMenuItem(value: 'all', child: Text('Select all / none (A)')),
-          PopupMenuItem(value: 'delete', child: Text('Delete selected')),
-          PopupMenuItem(value: 'scale', child: Text('Scale mesh')),
-          PopupMenuItem(value: 'hand', child: Text('Hand pan tool')),
-          PopupMenuDivider(),
-          PopupMenuItem(value: 'visible', child: Text('Select visible meshes')),
-          PopupMenuItem(value: 'join', child: Text('Join selected meshes')),
+  Widget _buildTouchToolsMenu() => MenuAnchor(
+        menuChildren: [
+          for (final (tool, label) in const [
+            ('box', 'Box select (B)'),
+            ('all', 'Select all / none (A)'),
+            ('delete', 'Delete selected'),
+            ('scale', 'Scale mesh'),
+            ('hand', 'Hand pan tool'),
+          ])
+            MenuItemButton(
+              onPressed: () => _handleTouchToolSelection(tool),
+              child: SizedBox(width: 210, child: Text(label)),
+            ),
+          const Divider(height: 1),
+          for (final (tool, label) in const [
+            ('visible', 'Select visible meshes'),
+            ('join', 'Join selected meshes'),
+          ])
+            MenuItemButton(
+              onPressed: () => _handleTouchToolSelection(tool),
+              child: SizedBox(width: 210, child: Text(label)),
+            ),
         ],
+        builder: (context, controller, child) => Tooltip(
+          message: 'Selection and viewport tools',
+          child: IconButton(
+            onPressed: () {
+              if (controller.isOpen) {
+                controller.close();
+              } else {
+                controller.open();
+              }
+            },
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.tune_rounded, size: 18),
+          ),
+        ),
       );
+
+  void _handleTouchToolSelection(String tool) {
+    switch (tool) {
+      case 'box':
+        setState(() {
+          _boxSelectActive = !_boxSelectActive;
+          _boxSelectionStart = null;
+          _boxSelectionEnd = null;
+        });
+      case 'all':
+        _toggleSelectAll();
+      case 'delete':
+        _deleteSelection();
+      case 'scale':
+        _showScaleDialog();
+      case 'hand':
+        setState(() {
+          _tool =
+              _tool == ActiveTool.hand ? ActiveTool.select : ActiveTool.hand;
+        });
+      case 'visible':
+        _selectVisibleMeshes();
+      case 'join':
+        _joinSelectedMeshes();
+    }
+  }
 
   String _viewName(ViewPreset view) => switch (view) {
         ViewPreset.free => 'Free',
@@ -4154,23 +4360,35 @@ class _ModelerScreenState extends State<ModelerScreen> {
         _objects.any((object) => object.rvCoordinateScale != null);
     return Row(
       children: [
-        if (hasRvMeshes) ...[
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            width: _isRvPanelVisible ? 220 : 36,
-            child: _isRvPanelVisible
-                ? _buildRvPanel()
-                : Align(
-                    alignment: Alignment.topLeft,
-                    child: IconButton(
-                      tooltip: 'Show RV panel',
-                      onPressed: () => setState(() => _isRvPanelVisible = true),
-                      icon: const Icon(Icons.add),
-                    ),
-                  ),
+        SizedBox(
+          width: 220,
+          child: Column(
+            children: [
+              if (hasRvMeshes) ...[
+                Expanded(
+                  flex: 5,
+                  child: _isRvPanelVisible
+                      ? _buildRvPanel()
+                      : Align(
+                          alignment: Alignment.topLeft,
+                          child: IconButton(
+                            tooltip: 'Show RV panel',
+                            onPressed: () =>
+                                setState(() => _isRvPanelVisible = true),
+                            icon: const Icon(Icons.add),
+                          ),
+                        ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              Expanded(
+                flex: hasRvMeshes ? 4 : 1,
+                child: _buildAtlasPanel(),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-        ],
+        ),
+        const SizedBox(width: 8),
         Expanded(
           child: _page == EditorPage.model
               ? _buildViewportWorkspace()
@@ -4210,6 +4428,176 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildAtlasPanel() {
+    final selectedMeshes = _selectedVisibleMeshIndices.length;
+    final selectedTextures = _selectedAtlasTextureCount;
+    return Container(
+      key: const ValueKey('atlasGeneratorPanel'),
+      decoration: _panelDecoration(),
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'ATLAS GENERATOR',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  letterSpacing: 1.1,
+                  color: Colors.white70,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          const Divider(height: 16),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                Text(
+                  '$selectedMeshes mesh(es) · $selectedTextures texture(s)',
+                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<int>(
+                  initialValue: _atlasMaxSize,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Maximum size',
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final size in [512, 1024, 2048, 4096])
+                      DropdownMenuItem(
+                        value: size,
+                        child: Text('$size × $size'),
+                      ),
+                  ],
+                  onChanged: (size) {
+                    if (size != null) {
+                      setState(() => _atlasMaxSize = size);
+                    }
+                  },
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<AtlasShape>(
+                  initialValue: _atlasShape,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Atlas shape',
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: AtlasShape.square,
+                      child: Text('Square'),
+                    ),
+                    DropdownMenuItem(
+                      value: AtlasShape.landscape,
+                      child: Text('Landscape'),
+                    ),
+                    DropdownMenuItem(
+                      value: AtlasShape.portrait,
+                      child: Text('Portrait'),
+                    ),
+                  ],
+                  onChanged: (shape) {
+                    if (shape != null) setState(() => _atlasShape = shape);
+                  },
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<int>(
+                  initialValue: _atlasPadding,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Island padding',
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final padding in [2, 4, 8, 16])
+                      DropdownMenuItem(
+                        value: padding,
+                        child: Text('$padding px'),
+                      ),
+                  ],
+                  onChanged: (padding) {
+                    if (padding != null) {
+                      setState(() => _atlasPadding = padding);
+                    }
+                  },
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<double>(
+                  initialValue: _atlasDensity,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Texture density',
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 0.5, child: Text('50%')),
+                    DropdownMenuItem(value: 0.75, child: Text('75%')),
+                    DropdownMenuItem(value: 1, child: Text('100%')),
+                    DropdownMenuItem(value: 1.5, child: Text('150%')),
+                    DropdownMenuItem(value: 2, child: Text('200%')),
+                  ],
+                  onChanged: (density) {
+                    if (density != null) {
+                      setState(() => _atlasDensity = density);
+                    }
+                  },
+                ),
+                Material(
+                  color: Colors.transparent,
+                  child: CheckboxListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text(
+                      'Auto-fit smallest size',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                    value: _atlasAutoFit,
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => _atlasAutoFit = value);
+                      }
+                    },
+                  ),
+                ),
+                const Text(
+                  'Selected meshes only. Source UV layout is preserved and '
+                  'repacked into one PNG.',
+                  style: TextStyle(color: Colors.white54, fontSize: 10),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: _isGeneratingAtlas ? null : _generateAtlas,
+            icon: _isGeneratingAtlas
+                ? const SizedBox.square(
+                    dimension: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.auto_awesome, size: 16),
+            label: Text(_isGeneratingAtlas ? 'Generating…' : 'Generate'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -4345,6 +4733,69 @@ class _ModelerScreenState extends State<ModelerScreen> {
           child: Padding(
             padding: const EdgeInsets.all(12),
             child: _buildRvPanel(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAtlasPanelSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF171B23),
+      builder: (context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.82,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: _buildAtlasPanel(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showMobileMeshesSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF171B23),
+      builder: (context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.65,
+          child: ListView(
+            children: [
+              const ListTile(
+                title: Text('Select meshes'),
+                subtitle:
+                    Text('Tap meshes to add or remove them from selection.'),
+              ),
+              for (var index = 0; index < _objects.length; index++)
+                CheckboxListTile(
+                  dense: true,
+                  title: Text(_objects[index].name),
+                  subtitle: Text(
+                    '${_objects[index].mesh.faces.length} faces',
+                  ),
+                  value: _selectedMeshIndices.contains(index),
+                  onChanged: _objects[index].visible
+                      ? (_) => _selectMesh(index, toggle: true)
+                      : null,
+                ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: FilledButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _showAtlasPanelSheet();
+                  },
+                  child: const Text('Open Atlas Generator'),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
           ),
         ),
       ),
@@ -5247,6 +5698,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       math.min(size.width, size.height).toDouble() * 0.72;
 
   Widget _buildBottomBar(bool wide) {
+    final compact = MediaQuery.sizeOf(context).width < 460;
     return Container(
       decoration: const BoxDecoration(
         color: Color(0xFF171B23),
@@ -5260,13 +5712,29 @@ class _ModelerScreenState extends State<ModelerScreen> {
               label: 'Model',
               icon: Icons.view_in_ar_rounded,
               selected: _page == EditorPage.model,
+              compact: compact,
               onPressed: () => setState(() => _page = EditorPage.model),
             ),
             _BottomNavButton(
               label: 'UVs',
               icon: Icons.grid_on_rounded,
               selected: _page == EditorPage.uv,
+              compact: compact,
               onPressed: () => setState(() => _page = EditorPage.uv),
+            ),
+            _BottomNavButton(
+              label: 'Meshes',
+              icon: Icons.view_list_rounded,
+              selected: false,
+              compact: compact,
+              onPressed: _showMobileMeshesSheet,
+            ),
+            _BottomNavButton(
+              label: 'Atlas',
+              icon: Icons.auto_awesome,
+              selected: false,
+              compact: compact,
+              onPressed: _showAtlasPanelSheet,
             ),
             const VerticalDivider(width: 18, indent: 8, endIndent: 8),
           ],
@@ -5380,15 +5848,25 @@ class _BottomNavButton extends StatelessWidget {
     required this.icon,
     required this.selected,
     required this.onPressed,
+    this.compact = false,
   });
 
   final String label;
   final IconData icon;
   final bool selected;
   final VoidCallback onPressed;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
+    if (compact) {
+      return IconButton(
+        tooltip: label,
+        onPressed: onPressed,
+        icon: Icon(icon),
+        color: selected ? const Color(0xFF94B9FF) : Colors.white60,
+      );
+    }
     return TextButton.icon(
       onPressed: onPressed,
       icon: Icon(icon, size: 18),
