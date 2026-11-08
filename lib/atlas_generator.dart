@@ -36,6 +36,20 @@ class AtlasLayout {
   final List<AtlasRegion> regions;
 }
 
+class AtlasTextureRegistry<T> {
+  final Map<Object, int> _indices = {};
+  final List<T?> textures = [];
+
+  int indexFor(Object key, T? texture) {
+    final existing = _indices[key];
+    if (existing != null) return existing;
+    final index = textures.length;
+    _indices[key] = index;
+    textures.add(texture);
+    return index;
+  }
+}
+
 class _Rect {
   const _Rect(this.x, this.y, this.width, this.height);
 

@@ -15,7 +15,7 @@ import 'mesh.dart';
 import 'model_io.dart';
 import 'rv_io.dart';
 
-const String _appVersion = '1.08';
+const String _appVersion = '1.1';
 
 void main(List<String> args) {
   String? initialPkyPath;
@@ -230,6 +230,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
   int _activeViewportIndex = 0;
   int _visibleViewportCount = 1;
   bool _isSidePanelVisible = true;
+  bool _isAtlasPanelVisible = true;
   bool _isRvPanelVisible = true;
   bool _isGeneratingAtlas = false;
   bool _atlasAutoFit = true;
@@ -309,6 +310,112 @@ class _ModelerScreenState extends State<ModelerScreen> {
       if (Platform.isWindows && kReleaseMode) _registerPkyAssociation();
       final path = widget.initialPkyPath;
       if (path != null) _loadScenePath(path);
+    });
+  }
+
+  Future<void> _renameMeshGroup(String groupName) async {
+    final members =
+        _objects.where((object) => object.groupName == groupName).toList();
+    if (members.isEmpty) return;
+    final controller = TextEditingController(text: groupName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename mesh group'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Group name'),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
+    final trimmed = name?.trim();
+    if (trimmed == null ||
+        trimmed.isEmpty ||
+        !mounted ||
+        members.any((object) => !_objects.contains(object))) {
+      return;
+    }
+    _recordUndo();
+    setState(() {
+      for (final object in members) {
+        object.groupName = trimmed;
+      }
+      if (_collapsedMeshGroups.remove(groupName)) {
+        _collapsedMeshGroups.add(trimmed);
+      }
+      _isDirty = true;
+    });
+  }
+
+  String _uniqueMeshGroupName(String preferred) {
+    final names = _objects.map((object) => object.groupName).toSet();
+    if (!names.contains(preferred)) return preferred;
+    var suffix = 2;
+    while (names.contains('${preferred}_$suffix')) {
+      suffix++;
+    }
+    return '${preferred}_$suffix';
+  }
+
+  Future<void> _duplicateMeshGroup(String groupName) async {
+    final sources =
+        _objects.where((object) => object.groupName == groupName).toList();
+    if (sources.isEmpty) return;
+    final totalFaces = sources.fold<int>(
+        0, (total, object) => total + object.mesh.faces.length);
+    if (!_canAddFaces(totalFaces)) return;
+    final groupCopyName = _uniqueMeshGroupName('${groupName}_copy');
+    final copies = <SceneObject>[];
+    for (final source in sources) {
+      final mesh = MeshModel.fromData(
+        source.mesh.vertices.map((vertex) => vertex.position),
+        source.mesh.faces.map(MeshFace.copyOf),
+        smoothShading: source.mesh.smoothShading,
+      );
+      mesh.moveVertices(
+        List.generate(mesh.vertices.length, (index) => index),
+        const Vec3(1.5, 0, 0),
+      );
+      copies.add(
+        SceneObject(
+          _uniqueMeshName('${source.name}_copy'),
+          mesh,
+          texturePath: source.texturePath,
+          textureImage: source.textureImage,
+          groupName: groupCopyName,
+          rvCoordinateScale: source.rvCoordinateScale,
+          rvCoordinateOrigin: source.rvCoordinateOrigin,
+          rvTextureAnimations: source.rvTextureAnimations,
+          rvTextures: Map.of(source.rvTextures),
+          rvTexturePaths: Map.of(source.rvTexturePaths),
+        ),
+      );
+    }
+    _recordUndo();
+    setState(() {
+      _objects.addAll(copies);
+      _activeObjectIndex = _objects.length - copies.length;
+      _selectedMeshIndices
+        ..clear()
+        ..addAll(List.generate(
+            copies.length, (index) => _activeObjectIndex + index));
+      _selectedVertices.clear();
+      _selectedFaces.clear();
+      _selectedFace = _mesh.faces.isEmpty ? null : 0;
+      _isDirty = true;
     });
   }
 
@@ -2296,12 +2403,36 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   Future<void> _deleteMeshAt(int index) async {
     if (index < 0 || index >= _objects.length) return;
-    final object = _objects[index];
+    await _deleteMeshes(
+      [_objects[index]],
+      title: 'Delete mesh?',
+      message: 'Delete "${_objects[index].name}"?',
+    );
+  }
+
+  Future<void> _deleteMeshGroup(String groupName) async {
+    final groupObjects =
+        _objects.where((object) => object.groupName == groupName).toList();
+    if (groupObjects.isEmpty) return;
+    await _deleteMeshes(
+      groupObjects,
+      title: 'Delete mesh group?',
+      message: 'Delete "$groupName" and all ${groupObjects.length} '
+          'contained ${groupObjects.length == 1 ? 'mesh' : 'meshes'}?',
+    );
+  }
+
+  Future<void> _deleteMeshes(
+    List<SceneObject> objects, {
+    required String title,
+    required String message,
+  }) async {
+    final targets = Set<SceneObject>.identity()..addAll(objects);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete mesh?'),
-        content: Text('Delete "${object.name}"?'),
+        title: Text(title),
+        content: Text(message),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -2315,30 +2446,38 @@ class _ModelerScreenState extends State<ModelerScreen> {
       ),
     );
     if (confirmed != true) return;
-    if (index >= _objects.length || !identical(_objects[index], object)) return;
-    final selectedBeforeDelete = _selectedMeshIndices.toList();
+    if (!mounted) return;
+    final deleted = _objects.where(targets.contains).toList();
+    if (deleted.length != targets.length) return;
+    final activeObject = _objects[_activeObjectIndex];
+    final activeDeleted = targets.contains(activeObject);
+    final activeIndexBeforeDelete = _activeObjectIndex;
+    final selectedObjects = [
+      for (final index in _selectedMeshIndices)
+        if (index >= 0 && index < _objects.length) _objects[index],
+    ];
     _recordUndo();
     setState(() {
-      if (_objects.length == 1) {
-        _objects[0] = SceneObject('Mesh_1', MeshModel.empty());
+      _objects.removeWhere(targets.contains);
+      _collapsedMeshGroups.removeWhere(
+        (name) => !_objects.any((object) => object.groupName == name),
+      );
+      if (_objects.isEmpty) {
+        _objects.add(SceneObject('Mesh_1', MeshModel.empty()));
+        _activeObjectIndex = 0;
         _selectedMeshIndices
           ..clear()
           ..add(0);
       } else {
-        _objects.removeAt(index);
+        _activeObjectIndex = activeDeleted
+            ? math.min(activeIndexBeforeDelete, _objects.length - 1)
+            : _objects.indexOf(activeObject);
         _selectedMeshIndices
           ..clear()
           ..addAll([
-            for (final selectedIndex in selectedBeforeDelete)
-              if (selectedIndex != index)
-                selectedIndex > index ? selectedIndex - 1 : selectedIndex,
+            for (final object in selectedObjects)
+              if (!targets.contains(object)) _objects.indexOf(object),
           ]);
-        if (index < _activeObjectIndex) {
-          _activeObjectIndex--;
-        } else if (index == _activeObjectIndex) {
-          _activeObjectIndex =
-              math.min(_activeObjectIndex, _objects.length - 1);
-        }
         if (_selectedMeshIndices.isEmpty) {
           _selectedMeshIndices.add(_activeObjectIndex);
         }
@@ -2467,10 +2606,11 @@ class _ModelerScreenState extends State<ModelerScreen> {
         position.dx,
         position.dy,
       ),
-      items: const [
-        PopupMenuItem(value: 'rename', child: Text('Rename mesh')),
-        PopupMenuItem(value: 'copy', child: Text('Create copy')),
-        PopupMenuItem(value: 'delete', child: Text('Delete mesh')),
+      items: [
+        _contextMenuItem(
+            'rename', 'Rename mesh', Icons.drive_file_rename_outline),
+        _contextMenuItem('copy', 'Create copy', Icons.copy_outlined),
+        _contextMenuItem('delete', 'Delete mesh', Icons.delete_outline),
       ],
     );
     switch (action) {
@@ -2481,6 +2621,61 @@ class _ModelerScreenState extends State<ModelerScreen> {
       case 'delete':
         await _deleteMeshAt(index);
     }
+  }
+
+  Future<void> _showGroupContextMenu(String groupName, Offset position) async {
+    if (!_objects.any((object) => object.groupName == groupName)) return;
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        position.dx,
+        position.dy,
+      ),
+      items: [
+        _contextMenuItem(
+            'rename', 'Rename group', Icons.drive_file_rename_outline),
+        _contextMenuItem('copy', 'Create group copy', Icons.copy_outlined),
+        _contextMenuItem('delete', 'Delete group', Icons.delete_outline),
+      ],
+    );
+    switch (action) {
+      case 'rename':
+        await _renameMeshGroup(groupName);
+      case 'copy':
+        await _duplicateMeshGroup(groupName);
+      case 'delete':
+        await _deleteMeshGroup(groupName);
+    }
+  }
+
+  PopupMenuItem<String> _contextMenuItem(
+    String value,
+    String label,
+    IconData icon,
+  ) {
+    return PopupMenuItem<String>(
+      value: value,
+      height: 34,
+      padding: EdgeInsets.zero,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          border: Border.all(color: const Color(0xFF48505E)),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15),
+            const SizedBox(width: 8),
+            Text(label, style: const TextStyle(fontSize: 11)),
+          ],
+        ),
+      ),
+    );
   }
 
   void _selectModelBox(Rect selection, Size size, ViewportState viewport) {
@@ -3299,21 +3494,38 @@ class _ModelerScreenState extends State<ModelerScreen> {
     ..sort();
 
   int get _selectedAtlasTextureCount {
-    final images = <ui.Image>[];
-    var hasUntexturedFaces = false;
+    final keys = <Object>{};
     for (final meshIndex in _selectedVisibleMeshIndices) {
       final object = _objects[meshIndex];
+      final keysByTextureIndex = <int, Object>{};
       for (final face in object.mesh.faces) {
-        final image =
-            object.rvTextures[face.rvTextureIndex] ?? object.textureImage;
-        if (image == null) {
-          hasUntexturedFaces = true;
-        } else if (!images.any((existing) => identical(existing, image))) {
-          images.add(image);
-        }
+        final textureIndex = face.rvTextureIndex;
+        keys.add(
+          keysByTextureIndex.putIfAbsent(textureIndex, () {
+            final image =
+                object.rvTextures[textureIndex] ?? object.textureImage;
+            return _atlasTextureKey(object, textureIndex, image);
+          }),
+        );
       }
     }
-    return images.length + (hasUntexturedFaces ? 1 : 0);
+    return keys.length;
+  }
+
+  Object _atlasTextureKey(
+    SceneObject object,
+    int textureIndex,
+    ui.Image? image,
+  ) {
+    final path = object.rvTexturePaths[textureIndex] ??
+        (object.rvTextures.containsKey(textureIndex)
+            ? null
+            : object.texturePath);
+    if (path != null && path.isNotEmpty) {
+      final normalized = File(path).absolute.path.replaceAll('\\', '/');
+      return 'path:${Platform.isWindows ? normalized.toLowerCase() : normalized}';
+    }
+    return image ?? 'untextured';
   }
 
   Future<void> _generateAtlas() async {
@@ -3331,7 +3543,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         XTypeGroup(label: 'PNG texture atlas', extensions: ['png']),
       ],
       suggestedName: 'Blunder_Atlas.png',
-      confirmButtonText: 'Generate',
+      confirmButtonText: 'Create Atlas',
     );
     if (location == null || !mounted) return;
     final outputPath = location.path.toLowerCase().endsWith('.png')
@@ -3341,24 +3553,28 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
     ui.Image? atlasImage;
     try {
-      final sourceImages = <ui.Image?>[];
+      final sources = AtlasTextureRegistry<ui.Image>();
       final sourceForFaces = <int, List<int>>{};
 
-      int sourceIndex(ui.Image? image) {
-        final existing = sourceImages.indexWhere(
-          (candidate) => identical(candidate, image),
+      int sourceIndex(SceneObject object, int textureIndex, ui.Image? image) {
+        return sources.indexFor(
+          _atlasTextureKey(object, textureIndex, image),
+          image,
         );
-        if (existing >= 0) return existing;
-        sourceImages.add(image);
-        return sourceImages.length - 1;
       }
 
       for (final meshIndex in meshIndices) {
         final object = _objects[meshIndex];
+        final sourceIdsByTextureIndex = <int, int>{};
         sourceForFaces[meshIndex] = [
           for (final face in object.mesh.faces)
-            sourceIndex(
-              object.rvTextures[face.rvTextureIndex] ?? object.textureImage,
+            sourceIdsByTextureIndex.putIfAbsent(
+              face.rvTextureIndex,
+              () => sourceIndex(
+                object,
+                face.rvTextureIndex,
+                object.rvTextures[face.rvTextureIndex] ?? object.textureImage,
+              ),
             ),
         ];
         if (object.mesh.faces.any(
@@ -3370,6 +3586,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
         }
       }
 
+      final sourceImages = sources.textures;
       final sourceSizes = [
         for (final image in sourceImages)
           AtlasTextureSize(image?.width ?? 1, image?.height ?? 1),
@@ -3456,7 +3673,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
       });
       atlasImage = null;
       _showMessage(
-        'Generated ${layout.width} × ${layout.height} atlas for '
+        'Created ${layout.width} × ${layout.height} atlas for '
         '${meshIndices.length} mesh(es) from ${sourceImages.length} texture(s).',
       );
     } catch (error) {
@@ -3815,6 +4032,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     'Help',
                     const [
                       PopupMenuItem(
+                        value: 'features',
+                        child: Text('Features'),
+                      ),
+                      PopupMenuItem(
                         value: 'shortcuts',
                         child: Text('Shortcut Keys'),
                       ),
@@ -3824,6 +4045,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       ),
                     ],
                     (value) {
+                      if (value == 'features') _showFeatures();
                       if (value == 'shortcuts') _showShortcutHelp();
                       if (value == 'about') _showAbout();
                     },
@@ -4075,6 +4297,95 @@ class _ModelerScreenState extends State<ModelerScreen> {
     );
   }
 
+  void _showFeatures() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Blunder Features'),
+        content: const SizedBox(
+          width: 560,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _FeatureSection(
+                  title: 'Create and edit meshes',
+                  description:
+                      'Start with a flat quad or add common primitives and '
+                      'gridded surfaces. In Vertex mode add and select vertices, '
+                      'then connect them into quads or triangles. In Face mode '
+                      'select, delete, flip, and merge faces. Move, rotate, '
+                      'scale, duplicate, join, hide, or rename meshes. Undo and '
+                      'redo edits with Ctrl+Z and Ctrl+Y.',
+                ),
+                _FeatureSection(
+                  title: 'Navigate the viewport',
+                  description:
+                      'Drag to orbit, use the mouse wheel or +/− controls to '
+                      'zoom, and use the Hand tool or Ctrl/Shift plus wheel to '
+                      'pan. Choose front, back, left, right, top, or bottom '
+                      'views. Use two or four independent viewports and add '
+                      'reference images when modeling from a blueprint.',
+                ),
+                _FeatureSection(
+                  title: 'UV mapping and Atlas Creator',
+                  description:
+                      'Create UVs with Project from view or Smart UV unwrap, '
+                      'then select, move, stretch, mirror, and rotate UV '
+                      'corners in the UV editor. Atlas Creator combines the '
+                      'textures used by selected meshes into one PNG, packs '
+                      'each distinct source texture once, and remaps UVs. '
+                      'Configure output shape, maximum size, island padding, '
+                      'texture density, and auto-fit.',
+                ),
+                _FeatureSection(
+                  title: 'Import and export',
+                  description:
+                      'Import OBJ, RV (*.prm), RV (*.w), and Blunder PKY/PKG '
+                      'projects. Export OBJ, PRM, and W models, or save a PKY '
+                      'project. OBJ material textures are loaded from their '
+                      'MTL references when available. RV tools preserve and '
+                      'edit face flags and texture assignments. In the RV '
+                      'panel, select faces and toggle Invisible, Mirroring, '
+                      'No EnvMap, Double-Sided, Add Blending, EnvMap, or '
+                      'Translucent. Apply Flag can select faces with a flag, '
+                      'apply the chosen flag to selected faces, or clear '
+                      'their flags. Blunder supports up to 100,000 faces per '
+                      'scene; missing textures can be assigned manually.',
+                ),
+                _FeatureSection(
+                  title: 'Requirements',
+                  description:
+                      'The app is built with Flutter. To build from source, '
+                      'install Flutter SDK (Dart 3.3 or later). Windows builds '
+                      'require Visual Studio with Desktop development with C++ '
+                      'and Windows Developer Mode. Android builds require '
+                      'Android Studio and an Android SDK. To run on Android, '
+                      'use a connected device or emulator.',
+                ),
+                _FeatureSection(
+                  title: 'Getting started',
+                  description:
+                      'Choose File → Import to open a model, or use Add to '
+                      'create geometry. Select meshes in the Scene panel; use '
+                      'the UV layout page to map textures. Select the meshes '
+                      'to combine before using Create Atlas. Help → Shortcut '
+                      'Keys lists keyboard controls.',
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showAbout() {
     showDialog<void>(
       context: context,
@@ -4086,8 +4397,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
             'Blunder v$_appVersion\n\n'
             'A lightweight, beginner-friendly polygon modeler for building '
             'and editing 3D meshes with vertices, faces, and UV mapping.\n\n'
-            'Created by - Prakhar Kumar Yadav\n'
-            'Built with assistance from GitHub Copilot.',
+            'Includes UV mapping and the Atlas Creator for combining textures '
+            'and remapping selected meshes.\n\n'
+            'Created by -Prakhar Kumar Yadav.',
           ),
         ),
         actions: [
@@ -4284,20 +4596,28 @@ class _ModelerScreenState extends State<ModelerScreen> {
             ('scale', 'Scale mesh'),
             ('hand', 'Hand pan tool'),
           ])
-            MenuItemButton(
-              onPressed: () => _handleTouchToolSelection(tool),
-              child: SizedBox(width: 210, child: Text(label)),
-            ),
-          const Divider(height: 1),
+            _touchToolMenuItem(tool, label),
+          Container(
+            margin: const EdgeInsets.symmetric(vertical: 3),
+            height: 1,
+            color: const Color(0xFF48505E),
+          ),
           for (final (tool, label) in const [
             ('visible', 'Select visible meshes'),
             ('join', 'Join selected meshes'),
           ])
-            MenuItemButton(
-              onPressed: () => _handleTouchToolSelection(tool),
-              child: SizedBox(width: 210, child: Text(label)),
-            ),
+            _touchToolMenuItem(tool, label),
         ],
+        style: MenuStyle(
+          backgroundColor: const WidgetStatePropertyAll(Color(0xFF171B23)),
+          padding: const WidgetStatePropertyAll(EdgeInsets.all(4)),
+          shape: WidgetStatePropertyAll(
+            RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(5),
+              side: const BorderSide(color: Color(0xFF48505E)),
+            ),
+          ),
+        ),
         builder: (context, controller, child) => Tooltip(
           message: 'Selection and viewport tools',
           child: IconButton(
@@ -4315,6 +4635,31 @@ class _ModelerScreenState extends State<ModelerScreen> {
           ),
         ),
       );
+
+  Widget _touchToolMenuItem(String tool, String label) {
+    return Container(
+      key: ValueKey('touchMenuItem-$tool'),
+      margin: const EdgeInsets.only(bottom: 3),
+      decoration: BoxDecoration(
+        border: Border.all(color: const Color(0xFF48505E)),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: MenuItemButton(
+        style: const ButtonStyle(
+          visualDensity: VisualDensity.compact,
+          minimumSize: WidgetStatePropertyAll(Size(0, 30)),
+          padding: WidgetStatePropertyAll(
+            EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+          ),
+        ),
+        onPressed: () => _handleTouchToolSelection(tool),
+        child: SizedBox(
+          width: 210,
+          child: Text(label, style: const TextStyle(fontSize: 11)),
+        ),
+      ),
+    );
+  }
 
   void _handleTouchToolSelection(String tool) {
     switch (tool) {
@@ -4401,7 +4746,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
           width: _isSidePanelVisible ? 220 : 36,
           child: ClipRect(
             child: OverflowBox(
-              alignment: Alignment.centerLeft,
+              alignment: Alignment.centerRight,
               minWidth: 220,
               maxWidth: 220,
               child: _isSidePanelVisible
@@ -4409,7 +4754,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   : SizedBox(
                       width: 220,
                       child: Align(
-                        alignment: Alignment.centerLeft,
+                        alignment: Alignment.centerRight,
                         child: SizedBox(
                           width: 36,
                           child: Center(
@@ -4432,22 +4777,48 @@ class _ModelerScreenState extends State<ModelerScreen> {
   }
 
   Widget _buildAtlasPanel() {
+    if (!_isAtlasPanelVisible) {
+      return Container(
+        decoration: _panelDecoration(),
+        alignment: Alignment.topLeft,
+        child: IconButton(
+          tooltip: 'Show Atlas Creator',
+          onPressed: () => setState(() => _isAtlasPanelVisible = true),
+          icon: const Icon(Icons.add),
+        ),
+      );
+    }
     final selectedMeshes = _selectedVisibleMeshIndices.length;
     final selectedTextures = _selectedAtlasTextureCount;
     return Container(
-      key: const ValueKey('atlasGeneratorPanel'),
+      key: const ValueKey('atlasCreatorPanel'),
       decoration: _panelDecoration(),
       padding: const EdgeInsets.all(10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            'ATLAS GENERATOR',
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  letterSpacing: 1.1,
-                  color: Colors.white70,
-                  fontWeight: FontWeight.w700,
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'ATLAS CREATOR',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        letterSpacing: 1.1,
+                        color: Colors.white70,
+                        fontWeight: FontWeight.w700,
+                      ),
                 ),
+              ),
+              IconButton(
+                tooltip: 'Hide Atlas Creator panel',
+                visualDensity: VisualDensity.compact,
+                constraints:
+                    const BoxConstraints.tightFor(width: 28, height: 28),
+                padding: EdgeInsets.zero,
+                onPressed: () => setState(() => _isAtlasPanelVisible = false),
+                icon: const Icon(Icons.chevron_left, size: 19),
+              ),
+            ],
           ),
           const Divider(height: 16),
           Expanded(
@@ -4459,105 +4830,50 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   style: const TextStyle(color: Colors.white70, fontSize: 11),
                 ),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<int>(
-                  initialValue: _atlasMaxSize,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Maximum size',
-                    isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
+                _atlasOption<int>(
+                  label: 'Maximum size',
+                  value: _atlasMaxSize,
+                  options: [
                     for (final size in [512, 1024, 2048, 4096])
-                      DropdownMenuItem(
-                        value: size,
-                        child: Text('$size × $size'),
-                      ),
+                      (size, '$size × $size'),
                   ],
-                  onChanged: (size) {
-                    if (size != null) {
-                      setState(() => _atlasMaxSize = size);
-                    }
-                  },
+                  onSelected: (size) => setState(() => _atlasMaxSize = size),
                 ),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<AtlasShape>(
-                  initialValue: _atlasShape,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Atlas shape',
-                    isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    border: OutlineInputBorder(),
-                  ),
-                  items: const [
-                    DropdownMenuItem(
-                      value: AtlasShape.square,
-                      child: Text('Square'),
-                    ),
-                    DropdownMenuItem(
-                      value: AtlasShape.landscape,
-                      child: Text('Landscape'),
-                    ),
-                    DropdownMenuItem(
-                      value: AtlasShape.portrait,
-                      child: Text('Portrait'),
-                    ),
+                _atlasOption<AtlasShape>(
+                  label: 'Atlas shape',
+                  value: _atlasShape,
+                  options: const [
+                    (AtlasShape.square, 'Square'),
+                    (AtlasShape.landscape, 'Landscape'),
+                    (AtlasShape.portrait, 'Portrait'),
                   ],
-                  onChanged: (shape) {
-                    if (shape != null) setState(() => _atlasShape = shape);
-                  },
+                  onSelected: (shape) => setState(() => _atlasShape = shape),
                 ),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<int>(
-                  initialValue: _atlasPadding,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Island padding',
-                    isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
+                _atlasOption<int>(
+                  label: 'Island padding',
+                  value: _atlasPadding,
+                  options: [
                     for (final padding in [2, 4, 8, 16])
-                      DropdownMenuItem(
-                        value: padding,
-                        child: Text('$padding px'),
-                      ),
+                      (padding, '$padding px'),
                   ],
-                  onChanged: (padding) {
-                    if (padding != null) {
-                      setState(() => _atlasPadding = padding);
-                    }
-                  },
+                  onSelected: (padding) =>
+                      setState(() => _atlasPadding = padding),
                 ),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<double>(
-                  initialValue: _atlasDensity,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Texture density',
-                    isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    border: OutlineInputBorder(),
-                  ),
-                  items: const [
-                    DropdownMenuItem(value: 0.5, child: Text('50%')),
-                    DropdownMenuItem(value: 0.75, child: Text('75%')),
-                    DropdownMenuItem(value: 1, child: Text('100%')),
-                    DropdownMenuItem(value: 1.5, child: Text('150%')),
-                    DropdownMenuItem(value: 2, child: Text('200%')),
+                _atlasOption<double>(
+                  label: 'Texture density',
+                  value: _atlasDensity,
+                  options: const [
+                    (0.5, '50%'),
+                    (0.75, '75%'),
+                    (1, '100%'),
+                    (1.5, '150%'),
+                    (2, '200%'),
                   ],
-                  onChanged: (density) {
-                    if (density != null) {
-                      setState(() => _atlasDensity = density);
-                    }
-                  },
+                  onSelected: (density) =>
+                      setState(() => _atlasDensity = density),
                 ),
                 Material(
                   color: Colors.transparent,
@@ -4593,11 +4909,100 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     dimension: 14,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.auto_awesome, size: 16),
-            label: Text(_isGeneratingAtlas ? 'Generating…' : 'Generate'),
+                : const Icon(Icons.build_outlined, size: 16),
+            label: Text(_isGeneratingAtlas ? 'Creating…' : 'Create Atlas'),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _atlasOption<T>({
+    required String label,
+    required T value,
+    required List<(T, String)> options,
+    required ValueChanged<T> onSelected,
+  }) {
+    return MenuAnchor(
+      style: MenuStyle(
+        backgroundColor: const WidgetStatePropertyAll(Color(0xFF171B23)),
+        padding: const WidgetStatePropertyAll(EdgeInsets.all(4)),
+        shape: WidgetStatePropertyAll(
+          RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(5),
+            side: const BorderSide(color: Color(0xFF48505E)),
+          ),
+        ),
+      ),
+      menuChildren: [
+        for (final (option, title) in options)
+          Container(
+            margin: const EdgeInsets.only(bottom: 3),
+            decoration: BoxDecoration(
+              border: Border.all(color: const Color(0xFF48505E)),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: MenuItemButton(
+              style: const ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                minimumSize: WidgetStatePropertyAll(Size(0, 30)),
+                padding: WidgetStatePropertyAll(
+                  EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                ),
+              ),
+              onPressed: () => onSelected(option),
+              child: SizedBox(
+                width: 184,
+                child: Text(title, style: const TextStyle(fontSize: 11)),
+              ),
+            ),
+          ),
+      ],
+      builder: (context, controller, child) {
+        final selectedLabel =
+            options.firstWhere((option) => option.$1 == value).$2;
+        return Container(
+          key: ValueKey('atlasOption-$label'),
+          decoration: BoxDecoration(
+            border: Border.all(color: const Color(0xFF48505E)),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(4),
+            onTap: () {
+              if (controller.isOpen) {
+                controller.close();
+              } else {
+                controller.open();
+              }
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          label,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 9,
+                          ),
+                        ),
+                        Text(selectedLabel,
+                            style: const TextStyle(fontSize: 11)),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.arrow_drop_down, size: 18),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -4791,7 +5196,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     Navigator.of(context).pop();
                     _showAtlasPanelSheet();
                   },
-                  child: const Text('Open Atlas Generator'),
+                  child: const Text('Open Atlas Creator'),
                 ),
               ),
               const SizedBox(height: 16),
@@ -4946,7 +5351,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                     const BoxConstraints.tightFor(width: 28, height: 28),
                 padding: EdgeInsets.zero,
                 onPressed: () => setState(() => _isSidePanelVisible = false),
-                icon: const Icon(Icons.chevron_left, size: 19),
+                icon: const Icon(Icons.chevron_right, size: 19),
               ),
             ],
           ),
@@ -5011,24 +5416,40 @@ class _ModelerScreenState extends State<ModelerScreen> {
                         final count = _objects
                             .where((object) => object.groupName == groupName)
                             .length;
-                        return ListTile(
-                          dense: true,
-                          leading: Icon(
-                            collapsed ? Icons.chevron_right : Icons.expand_more,
-                            size: 20,
+                        return GestureDetector(
+                          onSecondaryTapDown: (details) =>
+                              _showGroupContextMenu(
+                            groupName,
+                            details.globalPosition,
                           ),
-                          title: Text(groupName!),
-                          subtitle: Text(
-                            '$count imported ${count == 1 ? 'mesh' : 'meshes'}',
-                            style: const TextStyle(fontSize: 11),
+                          onLongPressStart: (details) => _showGroupContextMenu(
+                            groupName,
+                            details.globalPosition,
                           ),
-                          onTap: () => setState(() {
-                            if (collapsed) {
-                              _collapsedMeshGroups.remove(groupName);
-                            } else {
-                              _collapsedMeshGroups.add(groupName);
-                            }
-                          }),
+                          child: Material(
+                            color: Colors.transparent,
+                            child: ListTile(
+                              dense: true,
+                              leading: Icon(
+                                collapsed
+                                    ? Icons.chevron_right
+                                    : Icons.expand_more,
+                                size: 20,
+                              ),
+                              title: Text(groupName!),
+                              subtitle: Text(
+                                '$count imported ${count == 1 ? 'mesh' : 'meshes'}',
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                              onTap: () => setState(() {
+                                if (collapsed) {
+                                  _collapsedMeshGroups.remove(groupName);
+                                } else {
+                                  _collapsedMeshGroups.add(groupName);
+                                }
+                              }),
+                            ),
+                          ),
                         );
                       }
                       final object = _objects[meshIndex];
@@ -5840,6 +6261,37 @@ class _ModelerScreenState extends State<ModelerScreen> {
         border: Border.all(color: const Color(0xFF282E39)),
         borderRadius: BorderRadius.circular(14),
       );
+}
+
+class _FeatureSection extends StatelessWidget {
+  const _FeatureSection({
+    required this.title,
+    required this.description,
+  });
+
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: Color(0xFF9FBEFF),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(description),
+        ],
+      ),
+    );
+  }
 }
 
 class _BottomNavButton extends StatelessWidget {

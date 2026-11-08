@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.09** — Windows and Android polygon modeling build.
+**Version 1.1** — Windows and Android polygon modeling build.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
@@ -53,7 +53,8 @@ flutter test
   scene.
 - Right-click a mesh in the panel (or long-press it on touch devices) to rename
   it, create an independent copy, or delete it. Imported OBJ parts appear
-  beneath a collapsible group named after the OBJ file.
+  beneath a collapsible group named after the OBJ file. Right-click or
+  long-press a group to rename, duplicate, or delete all its meshes together.
 - Meshes are visible by default. Use each row's eye button to hide or show that
   mesh. Click a row to activate it; Ctrl-click rows to select multiple meshes,
   or press **A** to select all visible meshes. Press **Ctrl+J** to join the
@@ -129,11 +130,13 @@ flutter test
   **Enter** to move the selection. Press **E**, then **X** or **Y**, and drag
   to stretch along that UV axis; **M**, then **X** or **Y**, mirrors the
   selection. **Enter** confirms UV transforms and **Esc** cancels a transform.
-- Use the always-available **Atlas Generator** panel to combine textures from
+- Use the **Atlas Creator** panel to combine textures from
   selected visible meshes into one PNG atlas and remap their UVs. Choose a
   square, landscape, or portrait layout, maximum size, island padding, and
-  texture density; auto-fit selects the smallest suitable output size. On
-  touch devices, open **Atlas** from the bottom toolbar.
+  texture density; identical source textures are packed only once and
+  auto-fit selects the smallest suitable output size. Hide and restore its
+  panel with the collapse and plus buttons. On touch devices, open **Atlas**
+  from the bottom toolbar.
 - Press **U** or choose **Mesh → UV mapping** for **Project from view** or
   **Smart UV unwrap**. Mapping operates on selected faces and leaves other
   faces' UVs unchanged; with no faces selected it maps the full mesh. In the UV
@@ -196,5 +199,6 @@ The app is implemented in Flutter/Dart, which keeps the desktop and Android
 targets on one shared codebase. Python would add a separate runtime and would
 not simplify the existing Flutter UI or platform packaging.
 
-Use **Help → Shortcut Keys** in the app for the complete shortcut reference,
+Use **Help → Features** for an overview of modeling tools and platform
+requirements, **Help → Shortcut Keys** for the complete shortcut reference,
 and **Help → About Blunder** for application and creator credits.

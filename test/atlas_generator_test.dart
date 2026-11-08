@@ -2,6 +2,19 @@ import 'package:blunder/atlas_generator.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('AtlasTextureRegistry', () {
+    test('reuses a packed region for repeated source texture keys', () {
+      final registry = AtlasTextureRegistry<String>();
+
+      expect(
+          registry.indexFor(r'path:C:\textures\blue.png', 'first decode'), 0);
+      expect(
+          registry.indexFor(r'path:C:\textures\blue.png', 'second decode'), 0);
+      expect(registry.indexFor(r'path:C:\textures\red.png', 'red'), 1);
+      expect(registry.textures, ['first decode', 'red']);
+    });
+  });
+
   group('AtlasPacker', () {
     test('packs multiple textures into an auto-fit square', () {
       final layout = AtlasPacker.pack(

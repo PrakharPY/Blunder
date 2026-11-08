@@ -6,7 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:blunder/main.dart';
 
 void main() {
-  testWidgets('keeps the Atlas Generator available for every scene',
+  testWidgets('keeps the Atlas Creator available for every scene',
       (tester) async {
     tester.view.physicalSize = const Size(1100, 800);
     tester.view.devicePixelRatio = 1;
@@ -14,13 +14,70 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const BlunderApp());
-    expect(find.byKey(const ValueKey('atlasGeneratorPanel')), findsOneWidget);
-    expect(find.text('ATLAS GENERATOR'), findsOneWidget);
+    expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title,
+        'Blunder v1.1');
+    expect(find.byKey(const ValueKey('atlasCreatorPanel')), findsOneWidget);
+    expect(find.text('ATLAS CREATOR'), findsOneWidget);
     expect(find.text('Maximum size'), findsOneWidget);
     expect(find.text('Atlas shape'), findsOneWidget);
     expect(find.text('Island padding'), findsOneWidget);
     expect(find.text('Texture density'), findsOneWidget);
-    expect(find.text('Generate'), findsOneWidget);
+    expect(find.text('Create Atlas'), findsOneWidget);
+    expect(find.byIcon(Icons.build_outlined), findsOneWidget);
+  });
+
+  testWidgets('Atlas Creator panel can be hidden and restored', (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Hide Atlas Creator panel'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('atlasCreatorPanel')), findsNothing);
+    await tester.tap(find.byTooltip('Show Atlas Creator'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('atlasCreatorPanel')), findsOneWidget);
+  });
+
+  testWidgets('Help Features describes Atlas Creator and build requirements',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Help menu'));
+    await tester.pumpAndSettle();
+    expect(find.text('Features'), findsOneWidget);
+    await tester.tap(find.text('Features'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Blunder Features'), findsOneWidget);
+    expect(find.textContaining('Atlas Creator'), findsNWidgets(2));
+    expect(find.text('Requirements'), findsOneWidget);
+    expect(find.textContaining('Visual Studio'), findsOneWidget);
+  });
+
+  testWidgets('About credits the creator without tool attribution',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byTooltip('Help menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('About Blunder'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Created by -Prakhar Kumar Yadav.'),
+        findsOneWidget);
+    expect(find.textContaining('Atlas Creator'), findsOneWidget);
+    expect(find.textContaining('Copilot'), findsNothing);
   });
 
   testWidgets('shows selection and viewport tool choices in the dropdown',
@@ -38,6 +95,25 @@ void main() {
     expect(find.text('Select all / none (A)'), findsOneWidget);
     expect(find.text('Select visible meshes'), findsOneWidget);
     expect(find.text('Join selected meshes'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('touchMenuItem-box')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Atlas Creator options open a bordered compact menu',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+    await tester.tap(find.byKey(const ValueKey('atlasOption-Maximum size')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('1024 × 1024'), findsOneWidget);
+    expect(find.text('4096 × 4096'), findsOneWidget);
   });
 
   testWidgets('exposes mesh selection and atlas controls on narrow screens',
@@ -634,9 +710,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('About Blunder'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Blunder v1.08'), findsOneWidget);
-    expect(find.textContaining('Prakhar Kumar Yadav'), findsOneWidget);
-    expect(find.textContaining('GitHub Copilot'), findsOneWidget);
+    expect(find.textContaining('Blunder v1.1'), findsOneWidget);
+    expect(find.textContaining('Created by -Prakhar Kumar Yadav.'),
+        findsOneWidget);
+    expect(find.textContaining('Copilot'), findsNothing);
   });
 
   testWidgets('Strip continuously adds connected triangle faces',
