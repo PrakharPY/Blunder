@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:blunder/mesh.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -421,7 +423,7 @@ void main() {
       expect(mesh.updateUv(3, 0, Offset.zero), isFalse);
     });
 
-    test('smart UV remap separates face islands and fits them in the tile', () {
+    test('smart UV remap keeps disconnected faces in separate islands', () {
       final mesh = MeshModel.starterPlane();
       mesh.duplicateFace(0);
       mesh.moveVertices([4, 5, 6, 7], const Vec3(3, 0, 0));
@@ -437,6 +439,56 @@ void main() {
         isTrue,
       );
       expect(MeshModel.empty().smartUvRemap(), isFalse);
+    });
+
+    test('smart UV remap unfolds connected triangles into one continuous chart',
+        () {
+      final mesh = MeshModel.fromData(
+        const [
+          Vec3(0, 0, 0),
+          Vec3(1, 0, 0),
+          Vec3(1, 1, 0),
+          Vec3(0, 1, 0),
+          Vec3(2, 0, 0),
+          Vec3(2, 1, 0),
+        ],
+        [
+          MeshFace(
+              const [0, 1, 2], const [Offset.zero, Offset.zero, Offset.zero]),
+          MeshFace(
+              const [0, 2, 3], const [Offset.zero, Offset.zero, Offset.zero]),
+          MeshFace(
+              const [1, 4, 5], const [Offset.zero, Offset.zero, Offset.zero]),
+          MeshFace(
+              const [1, 5, 2], const [Offset.zero, Offset.zero, Offset.zero]),
+        ],
+      );
+
+      expect(mesh.smartUvRemap(), isTrue);
+      expect(mesh.faces[0].uv[0], mesh.faces[1].uv[0]);
+      expect(mesh.faces[0].uv[2], mesh.faces[1].uv[1]);
+      expect(mesh.faces[0].uv[1], mesh.faces[3].uv[0]);
+      expect(mesh.faces[0].uv[2], mesh.faces[3].uv[2]);
+      final allUvs = mesh.faces.expand((face) => face.uv).toList();
+      expect(
+          allUvs.map((uv) => uv.dx).reduce(math.min), greaterThanOrEqualTo(0));
+      expect(allUvs.map((uv) => uv.dx).reduce(math.max), lessThanOrEqualTo(1));
+      expect(
+          allUvs.map((uv) => uv.dy).reduce(math.min), greaterThanOrEqualTo(0));
+      expect(allUvs.map((uv) => uv.dy).reduce(math.max), lessThanOrEqualTo(1));
+    });
+
+    test('smart UV remap cuts cube charts at sharp edges', () {
+      final mesh = MeshModel.cube();
+
+      expect(mesh.smartUvRemap(), isTrue);
+      final chartOrigins = mesh.faces.map((face) {
+        return Offset(
+          face.uv.map((uv) => uv.dx).reduce(math.min),
+          face.uv.map((uv) => uv.dy).reduce(math.min),
+        );
+      }).toSet();
+      expect(chartOrigins, hasLength(6));
     });
   });
 }

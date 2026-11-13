@@ -15,7 +15,7 @@ void main() {
 
     await tester.pumpWidget(const BlunderApp());
     expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title,
-        'Blunder v1.2');
+        'Blunder v1.3');
     expect(find.byKey(const ValueKey('atlasCreatorPanel')), findsOneWidget);
     expect(find.text('ATLAS CREATOR'), findsOneWidget);
     expect(find.text('Maximum size'), findsOneWidget);
@@ -33,9 +33,22 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const BlunderApp());
+    final viewportBefore = tester.getSize(
+      find.byKey(const ValueKey('modelViewport')),
+    );
     await tester.tap(find.byTooltip('Hide Atlas Creator panel'));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('atlasCreatorPanel')), findsNothing);
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('collapsedAtlasCreatorPanel')))
+          .width,
+      36,
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('modelViewport'))).width,
+      greaterThan(viewportBefore.width + 150),
+    );
     await tester.tap(find.byTooltip('Show Atlas Creator'));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('atlasCreatorPanel')), findsOneWidget);
@@ -116,6 +129,22 @@ void main() {
     expect(find.text('4096 × 4096'), findsNWidgets(2));
   });
 
+  testWidgets('mesh detail rows use compact menu-height styling',
+      (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const BlunderApp());
+
+    expect(
+      tester.getSize(find.byKey(const ValueKey('meshRow-0'))).height,
+      lessThan(34),
+    );
+    expect(find.textContaining('4 vertices · 1 face'), findsOneWidget);
+  });
+
   testWidgets('exposes mesh selection and atlas controls on narrow screens',
       (tester) async {
     tester.view.physicalSize = const Size(400, 800);
@@ -153,7 +182,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('Smart UV remap'), findsOneWidget);
+    expect(find.text('Smart UV unwrap'), findsOneWidget);
     expect(find.text('Add texture'), findsOneWidget);
   });
 
@@ -289,28 +318,25 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const BlunderApp());
-    final firstMeshTile = find.ancestor(
-      of: find.textContaining('Mesh_1'),
-      matching: find.byType(ListTile),
-    );
-    expect(tester.widget<ListTile>(firstMeshTile).selected, isTrue);
+    final firstMeshRow = find.byKey(const ValueKey('meshRow-0'));
+    expect(tester.getSize(firstMeshRow).height, lessThan(34));
+    BoxDecoration rowDecoration(int index) => tester
+        .widget<Container>(find.byKey(ValueKey('meshRow-$index')))
+        .decoration! as BoxDecoration;
+    expect(rowDecoration(0).border!.top.color, const Color(0xFF526783));
 
     await tester.tap(find.byTooltip('Add mesh').last);
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Mesh_1'), findsOneWidget);
     expect(find.textContaining('Mesh_2'), findsOneWidget);
-    final secondMeshTile = find.ancestor(
-      of: find.textContaining('Mesh_2'),
-      matching: find.byType(ListTile),
-    );
-    expect(tester.widget<ListTile>(firstMeshTile).selected, isFalse);
-    expect(tester.widget<ListTile>(secondMeshTile).selected, isTrue);
+    expect(rowDecoration(0).border!.top.color, const Color(0xFF394252));
+    expect(rowDecoration(1).border!.top.color, const Color(0xFF526783));
 
     await tester.tap(find.textContaining('Mesh_1'));
     await tester.pumpAndSettle();
-    expect(tester.widget<ListTile>(firstMeshTile).selected, isTrue);
-    expect(tester.widget<ListTile>(secondMeshTile).selected, isFalse);
+    expect(rowDecoration(0).border!.top.color, const Color(0xFF526783));
+    expect(rowDecoration(1).border!.top.color, const Color(0xFF394252));
   });
 
   testWidgets('mesh long-press menu renames and copies a mesh', (tester) async {
@@ -345,11 +371,13 @@ void main() {
     await tester.tap(find.text('Delete'));
     await tester.pumpAndSettle();
     expect(find.textContaining('Ground ·'), findsNothing);
-    final remainingTile = find.ancestor(
-      of: find.textContaining('Ground_copy'),
-      matching: find.byType(ListTile),
+    final remainingRow = tester.widget<Container>(
+      find.byKey(const ValueKey('meshRow-0')),
     );
-    expect(tester.widget<ListTile>(remainingTile).selected, isTrue);
+    expect(
+      (remainingRow.decoration! as BoxDecoration).border!.top.color,
+      const Color(0xFF526783),
+    );
   });
 
   testWidgets('keeps Add vertex active for repeated viewport clicks',
@@ -710,7 +738,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('About Blunder'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Blunder v1.2'), findsOneWidget);
+    expect(find.textContaining('Blunder v1.3'), findsOneWidget);
     expect(find.textContaining('Created by -Prakhar Kumar Yadav.'),
         findsOneWidget);
     expect(find.textContaining('Copilot'), findsNothing);

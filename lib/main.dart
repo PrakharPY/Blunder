@@ -15,7 +15,7 @@ import 'mesh.dart';
 import 'model_io.dart';
 import 'rv_io.dart';
 
-const String _appVersion = '1.2';
+const String _appVersion = '1.3';
 
 void main(List<String> args) {
   String? initialPkyPath;
@@ -602,7 +602,9 @@ class _ModelerScreenState extends State<ModelerScreen> {
             child: const ListTile(
               leading: Icon(Icons.auto_fix_high),
               title: Text('Smart UV unwrap'),
-              subtitle: Text('Pack selected faces into separate UV tiles.'),
+              subtitle: Text(
+                'Unfold connected surfaces into texture-ready islands.',
+              ),
             ),
           ),
         ],
@@ -3714,7 +3716,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
     }
     setState(() => _isDirty = true);
     _showMessage(
-      'Smart UV remap created non-overlapping face islands'
+      'Smart UV unwrap created connected surface islands'
       '${faceIndices == null ? '.' : ' for ${faceIndices.length} selected face(s).'}',
     );
   }
@@ -4726,32 +4728,44 @@ class _ModelerScreenState extends State<ModelerScreen> {
         _objects.any((object) => object.rvCoordinateScale != null);
     return Row(
       children: [
-        SizedBox(
-          width: 220,
-          child: Column(
-            children: [
-              if (hasRvMeshes) ...[
-                Expanded(
-                  flex: 5,
-                  child: _isRvPanelVisible
-                      ? _buildRvPanel()
-                      : Align(
-                          alignment: Alignment.topLeft,
-                          child: IconButton(
-                            tooltip: 'Show RV panel',
-                            onPressed: () =>
-                                setState(() => _isRvPanelVisible = true),
-                            icon: const Icon(Icons.add),
-                          ),
-                        ),
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeInOut,
+          width: _isAtlasPanelVisible || hasRvMeshes ? 220 : 36,
+          child: ClipRect(
+            child: OverflowBox(
+              alignment: Alignment.centerLeft,
+              minWidth: 220,
+              maxWidth: 220,
+              child: SizedBox(
+                width: 220,
+                child: Column(
+                  children: [
+                    if (hasRvMeshes) ...[
+                      Expanded(
+                        flex: 5,
+                        child: _isRvPanelVisible
+                            ? _buildRvPanel()
+                            : Align(
+                                alignment: Alignment.topLeft,
+                                child: IconButton(
+                                  tooltip: 'Show RV panel',
+                                  onPressed: () =>
+                                      setState(() => _isRvPanelVisible = true),
+                                  icon: const Icon(Icons.add),
+                                ),
+                              ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    Expanded(
+                      flex: hasRvMeshes ? 4 : 1,
+                      child: _buildAtlasPanel(),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 8),
-              ],
-              Expanded(
-                flex: hasRvMeshes ? 4 : 1,
-                child: _buildAtlasPanel(),
               ),
-            ],
+            ),
           ),
         ),
         const SizedBox(width: 8),
@@ -4799,13 +4813,21 @@ class _ModelerScreenState extends State<ModelerScreen> {
 
   Widget _buildAtlasPanel() {
     if (!_isAtlasPanelVisible) {
-      return Container(
-        decoration: _panelDecoration(),
-        alignment: Alignment.topLeft,
-        child: IconButton(
-          tooltip: 'Show Atlas Creator',
-          onPressed: () => setState(() => _isAtlasPanelVisible = true),
-          icon: const Icon(Icons.add),
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Container(
+          key: const ValueKey('collapsedAtlasCreatorPanel'),
+          width: 36,
+          decoration: _panelDecoration(),
+          alignment: Alignment.center,
+          child: IconButton(
+            tooltip: 'Show Atlas Creator',
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints.tightFor(width: 30, height: 30),
+            padding: EdgeInsets.zero,
+            onPressed: () => setState(() => _isAtlasPanelVisible = true),
+            icon: const Icon(Icons.add),
+          ),
         ),
       );
     }
@@ -5065,24 +5087,13 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<int>(
-                  initialValue: _rvFlagToSelect,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    for (final (label, flag) in _rvFaceFlags)
-                      DropdownMenuItem(value: flag, child: Text(label)),
+                _atlasOption<int>(
+                  label: 'Flag',
+                  value: _rvFlagToSelect,
+                  options: [
+                    for (final (label, flag) in _rvFaceFlags) (flag, label),
                   ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(() => _rvFlagToSelect = value);
-                    }
-                  },
+                  onSelected: (flag) => setState(() => _rvFlagToSelect = flag),
                 ),
                 const SizedBox(height: 8),
                 Wrap(
@@ -5423,28 +5434,61 @@ class _ModelerScreenState extends State<ModelerScreen> {
                             groupName,
                             details.globalPosition,
                           ),
-                          child: Material(
-                            color: Colors.transparent,
-                            child: ListTile(
-                              dense: true,
-                              leading: Icon(
-                                collapsed
-                                    ? Icons.chevron_right
-                                    : Icons.expand_more,
-                                size: 20,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 1),
+                            child: Material(
+                              color: const Color(0xFF171B23),
+                              borderRadius: BorderRadius.circular(5),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(5),
+                                onTap: () => setState(() {
+                                  if (collapsed) {
+                                    _collapsedMeshGroups.remove(groupName);
+                                  } else {
+                                    _collapsedMeshGroups.add(groupName);
+                                  }
+                                }),
+                                child: Container(
+                                  key: ValueKey('meshGroupRow-$groupName'),
+                                  height: 28,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                      color: const Color(0xFF394252),
+                                    ),
+                                    borderRadius: BorderRadius.circular(5),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        collapsed
+                                            ? Icons.chevron_right
+                                            : Icons.expand_more,
+                                        size: 17,
+                                        color: Colors.white70,
+                                      ),
+                                      const SizedBox(width: 3),
+                                      Expanded(
+                                        child: Text(
+                                          groupName!,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontSize: 10),
+                                        ),
+                                      ),
+                                      Text(
+                                        '$count ${count == 1 ? 'mesh' : 'meshes'}',
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 9,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
-                              title: Text(groupName!),
-                              subtitle: Text(
-                                '$count imported ${count == 1 ? 'mesh' : 'meshes'}',
-                                style: const TextStyle(fontSize: 11),
-                              ),
-                              onTap: () => setState(() {
-                                if (collapsed) {
-                                  _collapsedMeshGroups.remove(groupName);
-                                } else {
-                                  _collapsedMeshGroups.add(groupName);
-                                }
-                              }),
                             ),
                           ),
                         );
@@ -5468,55 +5512,77 @@ class _ModelerScreenState extends State<ModelerScreen> {
                             meshIndex,
                             details.globalPosition,
                           ),
-                          child: Material(
-                            color: Colors.transparent,
-                            borderRadius: BorderRadius.circular(8),
-                            child: ListTile(
-                              dense: true,
-                              visualDensity: VisualDensity.compact,
-                              contentPadding:
-                                  const EdgeInsets.symmetric(horizontal: 8),
-                              selected: selected,
-                              selectedTileColor: active
-                                  ? const Color(0xFF283955)
-                                  : const Color(0xFF222A37),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              title: Text(
-                                '${object.name} · '
-                                '$vertexCount ${vertexCount == 1 ? 'vertex' : 'vertices'} · '
-                                '$faceCount ${faceCount == 1 ? 'face' : 'faces'}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                              trailing: IconButton(
-                                tooltip: objectVisible
-                                    ? 'Hide ${object.name}'
-                                    : 'Show ${object.name}',
-                                visualDensity: VisualDensity.compact,
-                                constraints: const BoxConstraints.tightFor(
-                                  width: 30,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 1),
+                            child: Material(
+                              color: selected
+                                  ? active
+                                      ? const Color(0xFF283955)
+                                      : const Color(0xFF222A37)
+                                  : const Color(0xFF171B23),
+                              borderRadius: BorderRadius.circular(5),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(5),
+                                onTap: () => _selectMesh(
+                                  meshIndex,
+                                  toggle: HardwareKeyboard
+                                      .instance.isControlPressed,
+                                ),
+                                child: Container(
+                                  key: ValueKey('meshRow-$meshIndex'),
                                   height: 30,
+                                  padding: const EdgeInsets.only(
+                                    left: 7,
+                                    right: 3,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                      color: selected
+                                          ? const Color(0xFF526783)
+                                          : const Color(0xFF394252),
+                                    ),
+                                    borderRadius: BorderRadius.circular(5),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          '${object.name} · '
+                                          '$vertexCount ${vertexCount == 1 ? 'vertex' : 'vertices'} · '
+                                          '$faceCount ${faceCount == 1 ? 'face' : 'faces'}',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 10,
+                                          ),
+                                        ),
+                                      ),
+                                      IconButton(
+                                        tooltip: objectVisible
+                                            ? 'Hide ${object.name}'
+                                            : 'Show ${object.name}',
+                                        visualDensity: VisualDensity.compact,
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                          width: 24,
+                                          height: 24,
+                                        ),
+                                        padding: EdgeInsets.zero,
+                                        onPressed: () =>
+                                            _toggleMeshVisibility(meshIndex),
+                                        icon: Icon(
+                                          objectVisible
+                                              ? Icons.visibility_outlined
+                                              : Icons.visibility_off_outlined,
+                                          size: 16,
+                                          color: objectVisible
+                                              ? Colors.white70
+                                              : Colors.white38,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                                padding: EdgeInsets.zero,
-                                onPressed: () =>
-                                    _toggleMeshVisibility(meshIndex),
-                                icon: Icon(
-                                  objectVisible
-                                      ? Icons.visibility_outlined
-                                      : Icons.visibility_off_outlined,
-                                  size: 18,
-                                  color: objectVisible
-                                      ? Colors.white70
-                                      : Colors.white38,
-                                ),
-                              ),
-                              onTap: () => _selectMesh(
-                                meshIndex,
-                                toggle:
-                                    HardwareKeyboard.instance.isControlPressed,
                               ),
                             ),
                           ),
@@ -6001,7 +6067,7 @@ class _ModelerScreenState extends State<ModelerScreen> {
                 FilledButton.tonalIcon(
                   onPressed: _smartUvRemap,
                   icon: const Icon(Icons.auto_fix_high, size: 17),
-                  label: const Text('Smart UV remap'),
+                  label: const Text('Smart UV unwrap'),
                 ),
                 OutlinedButton.icon(
                   onPressed: _openUvMappingOptions,

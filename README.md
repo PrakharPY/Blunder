@@ -120,8 +120,9 @@ flutter test
   Select vertices or faces and press **R**, then **X/Y/Z**, type an angle, and
   press **Enter** to rotate around that axis. If nothing is selected, rotation
   applies to the active mesh.
-- Open **UVs** and choose **Smart UV remap** to project each face and pack its
-  UV island into a separate tile in the 0–1 texture space. Select a face in
+- Open **UVs** and choose **Smart UV unwrap** to unfold connected face regions
+  into continuous texture-ready islands, cutting at sharp bends and packing
+  the islands into the 0–1 texture space. Select a face in
   Model view to drag its UV corners manually. Use **Add texture** in the UV
   toolbar to assign a texture to the active mesh; it remains linked to that
   mesh and is used in Textured view. In the UV editor, press **B** and drag a

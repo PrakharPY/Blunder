@@ -61,8 +61,31 @@ class MeshFace {
       );
 }
 
+class _UvChart {
+  const _UvChart(this.faceUvs, this.minX, this.minY, this.maxX, this.maxY);
+
+  final Map<int, List<Offset>> faceUvs;
+  final double minX;
+  final double minY;
+  final double maxX;
+  final double maxY;
+
+  double get width => maxX - minX;
+  double get height => maxY - minY;
+}
+
+class _UvChartPlacement {
+  const _UvChartPlacement(this.chart, this.x, this.y, this.scale);
+
+  final _UvChart chart;
+  final double x;
+  final double y;
+  final double scale;
+}
+
 class MeshModel {
   static const int maxFaceCount = 100000;
+  static const double _uvChartNormalDot = 0.5;
 
   MeshModel._(this.vertices, this.faces, {this.smoothShading = false});
 
@@ -865,73 +888,353 @@ class MeshModel {
         List<int>.generate(faces.length, (index) => index);
     selection.sort();
     if (selection.isEmpty ||
-        selection.any((index) => index < 0 || index >= faces.length)) {
+        selection.any(
+          (index) =>
+              index < 0 ||
+              index >= faces.length ||
+              faces[index].vertices.any(
+                    (vertex) => vertex < 0 || vertex >= vertices.length,
+                  ),
+        )) {
       return false;
     }
 
-    final columns = math.sqrt(selection.length).ceil();
-    final rows = (selection.length / columns).ceil();
-    final cellWidth = 1 / columns;
-    final cellHeight = 1 / rows;
-    final margin = math.min(cellWidth, cellHeight) * 0.08;
-
-    for (var layoutIndex = 0; layoutIndex < selection.length; layoutIndex++) {
-      final faceIndex = selection[layoutIndex];
+    final normals = <int, Vec3>{};
+    final localCoordinates = <int, List<Offset>>{};
+    final edgeFaces = <(int, int), List<int>>{};
+    for (final faceIndex in selection) {
       final face = faces[faceIndex];
-      final positions =
-          face.vertices.map((index) => vertices[index].position).toList();
-      var normalX = 0.0;
-      var normalY = 0.0;
-      var normalZ = 0.0;
-      for (var index = 0; index < positions.length; index++) {
-        final current = positions[index];
-        final next = positions[(index + 1) % positions.length];
-        normalX += (current.y - next.y) * (current.z + next.z);
-        normalY += (current.z - next.z) * (current.x + next.x);
-        normalZ += (current.x - next.x) * (current.y + next.y);
+      normals[faceIndex] = _faceNormal(face);
+      localCoordinates[faceIndex] = _faceLocalCoordinates(face);
+      for (var corner = 0; corner < face.vertices.length; corner++) {
+        final first = face.vertices[corner];
+        final second = face.vertices[(corner + 1) % face.vertices.length];
+        final edge = first < second ? (first, second) : (second, first);
+        edgeFaces.putIfAbsent(edge, () => []).add(faceIndex);
       }
-      final components = [normalX.abs(), normalY.abs(), normalZ.abs()];
-      var droppedAxis = 0;
-      if (components[1] > components[droppedAxis]) droppedAxis = 1;
-      if (components[2] > components[droppedAxis]) droppedAxis = 2;
-      final projected = positions.map((point) {
-        return switch (droppedAxis) {
-          0 => Offset(point.y, point.z),
-          1 => Offset(point.z, point.x),
-          _ => Offset(point.x, point.y),
-        };
-      }).toList();
-      final minX = projected.map((point) => point.dx).reduce(math.min);
-      final maxX = projected.map((point) => point.dx).reduce(math.max);
-      final minY = projected.map((point) => point.dy).reduce(math.min);
-      final maxY = projected.map((point) => point.dy).reduce(math.max);
-      final spanX = maxX - minX;
-      final spanY = maxY - minY;
-      final availableWidth = cellWidth - margin * 2;
-      final availableHeight = cellHeight - margin * 2;
-      final scale = math.min(
-        availableWidth / math.max(spanX, 1e-8),
-        availableHeight / math.max(spanY, 1e-8),
-      );
-      final offsetX = (layoutIndex % columns) * cellWidth;
-      final offsetY = 1 - ((layoutIndex ~/ columns) + 1) * cellHeight;
-      final usedWidth = spanX * scale;
-      final usedHeight = spanY * scale;
-      final centeredX = offsetX + (cellWidth - usedWidth) / 2;
-      final centeredY = offsetY + (cellHeight - usedHeight) / 2;
-      face.uv
-        ..clear()
-        ..addAll(
-          projected.map(
-            (point) => Offset(
-              centeredX + (point.dx - minX) * scale,
-              centeredY + (point.dy - minY) * scale,
+    }
+
+    final adjacency = <int, List<(int, int, int)>>{
+      for (final faceIndex in selection) faceIndex: [],
+    };
+    for (final entry in edgeFaces.entries) {
+      final connectedFaces = entry.value;
+      for (var first = 0; first < connectedFaces.length; first++) {
+        for (var second = first + 1; second < connectedFaces.length; second++) {
+          final firstFace = connectedFaces[first];
+          final secondFace = connectedFaces[second];
+          if (_dot(normals[firstFace]!, normals[secondFace]!) <
+              _uvChartNormalDot) {
+            continue;
+          }
+          adjacency[firstFace]!.add(
+            (secondFace, entry.key.$1, entry.key.$2),
+          );
+          adjacency[secondFace]!.add(
+            (firstFace, entry.key.$1, entry.key.$2),
+          );
+        }
+      }
+    }
+
+    final visited = <int>{};
+    final charts = <_UvChart>[];
+    for (final seed in selection) {
+      if (!visited.add(seed)) continue;
+      final component = <int>[seed];
+      final queue = <int>[seed];
+      for (var cursor = 0; cursor < queue.length; cursor++) {
+        for (final (neighbor, _, _) in adjacency[queue[cursor]]!) {
+          if (_dot(normals[seed]!, normals[neighbor]!) < _uvChartNormalDot) {
+            continue;
+          }
+          if (visited.add(neighbor)) {
+            queue.add(neighbor);
+            component.add(neighbor);
+          }
+        }
+      }
+
+      final componentSet = component.toSet();
+      final chartUvs = <int, List<Offset>>{
+        seed: List.of(localCoordinates[seed]!),
+      };
+      final unfolded = <int>{seed};
+      final unfoldQueue = <int>[seed];
+      for (var cursor = 0; cursor < unfoldQueue.length; cursor++) {
+        final parent = unfoldQueue[cursor];
+        for (final (child, edgeA, edgeB) in adjacency[parent]!) {
+          if (!componentSet.contains(child) || !unfolded.add(child)) continue;
+          final childUvs = _unfoldFaceAcrossEdge(
+            parent,
+            child,
+            edgeA,
+            edgeB,
+            chartUvs[parent]!,
+            localCoordinates[child]!,
+          );
+          if (childUvs == null) {
+            unfolded.remove(child);
+            continue;
+          }
+          chartUvs[child] = childUvs;
+          unfoldQueue.add(child);
+        }
+      }
+      if (chartUvs.length != component.length) {
+        for (final faceIndex in component) {
+          chartUvs.putIfAbsent(
+            faceIndex,
+            () => List.of(localCoordinates[faceIndex]!),
+          );
+        }
+      }
+      charts.add(_createUvChart(chartUvs));
+    }
+
+    final placements = _packUvCharts(charts);
+    if (placements == null) return false;
+    for (final placement in placements) {
+      final chart = placement.chart;
+      for (final entry in chart.faceUvs.entries) {
+        faces[entry.key].uv
+          ..clear()
+          ..addAll(
+            entry.value.map(
+              (uv) => Offset(
+                placement.x + (uv.dx - chart.minX) * placement.scale,
+                placement.y + (uv.dy - chart.minY) * placement.scale,
+              ),
             ),
-          ),
-        );
+          );
+      }
     }
     return true;
   }
+
+  Vec3 _faceNormal(MeshFace face) {
+    var x = 0.0;
+    var y = 0.0;
+    var z = 0.0;
+    for (var index = 0; index < face.vertices.length; index++) {
+      final current = vertices[face.vertices[index]].position;
+      final next =
+          vertices[face.vertices[(index + 1) % face.vertices.length]].position;
+      x += (current.y - next.y) * (current.z + next.z);
+      y += (current.z - next.z) * (current.x + next.x);
+      z += (current.x - next.x) * (current.y + next.y);
+    }
+    final length = math.sqrt(x * x + y * y + z * z);
+    if (length > 1e-12) {
+      return Vec3(x / length, y / length, z / length);
+    }
+    return const Vec3(0, 0, 1);
+  }
+
+  List<Offset> _faceLocalCoordinates(MeshFace face) {
+    final origin = vertices[face.vertices.first].position;
+    final normal = _faceNormal(face);
+    var bestEdge = const Vec3(1, 0, 0);
+    var bestLengthSquared = 0.0;
+    for (var index = 0; index < face.vertices.length; index++) {
+      final current = vertices[face.vertices[index]].position;
+      final next =
+          vertices[face.vertices[(index + 1) % face.vertices.length]].position;
+      final edge = _subtract(next, current);
+      final lengthSquared = _dot(edge, edge);
+      if (lengthSquared > bestLengthSquared) {
+        bestLengthSquared = lengthSquared;
+        bestEdge = edge;
+      }
+    }
+    final edgeLength = math.sqrt(bestLengthSquared);
+    if (edgeLength <= 1e-12) {
+      return List.filled(face.vertices.length, Offset.zero);
+    }
+    final axisX = _scale(bestEdge, 1 / edgeLength);
+    var axisY = _cross(normal, axisX);
+    var axisYLength = math.sqrt(_dot(axisY, axisY));
+    if (axisYLength <= 1e-12) {
+      final reference =
+          axisX.x.abs() < 0.8 ? const Vec3(1, 0, 0) : const Vec3(0, 1, 0);
+      axisY = _subtract(reference, _scale(axisX, _dot(reference, axisX)));
+      axisYLength = math.sqrt(_dot(axisY, axisY));
+    }
+    final normalizedY = _scale(axisY, 1 / axisYLength);
+    return [
+      for (final vertexIndex in face.vertices)
+        Offset(
+          _dot(_subtract(vertices[vertexIndex].position, origin), axisX),
+          _dot(_subtract(vertices[vertexIndex].position, origin), normalizedY),
+        ),
+    ];
+  }
+
+  List<Offset>? _unfoldFaceAcrossEdge(
+    int parentIndex,
+    int childIndex,
+    int edgeA,
+    int edgeB,
+    List<Offset> parentUvs,
+    List<Offset> childLocalUvs,
+  ) {
+    final parentFace = faces[parentIndex];
+    final childFace = faces[childIndex];
+    final parentA = parentFace.vertices.indexOf(edgeA);
+    final parentB = parentFace.vertices.indexOf(edgeB);
+    final childA = childFace.vertices.indexOf(edgeA);
+    final childB = childFace.vertices.indexOf(edgeB);
+    if (parentA < 0 || parentB < 0 || childA < 0 || childB < 0) return null;
+
+    final sourceA = childLocalUvs[childA];
+    final sourceB = childLocalUvs[childB];
+    final targetA = parentUvs[parentA];
+    final targetB = parentUvs[parentB];
+    final sourceDx = sourceB.dx - sourceA.dx;
+    final sourceDy = sourceB.dy - sourceA.dy;
+    final targetDx = targetB.dx - targetA.dx;
+    final targetDy = targetB.dy - targetA.dy;
+    final sourceLength = math.sqrt(sourceDx * sourceDx + sourceDy * sourceDy);
+    final targetLength = math.sqrt(targetDx * targetDx + targetDy * targetDy);
+    if (sourceLength <= 1e-12 || targetLength <= 1e-12) return null;
+    final sourceUnit = Offset(sourceDx / sourceLength, sourceDy / sourceLength);
+    final targetUnit = Offset(targetDx / targetLength, targetDy / targetLength);
+    final parentCenter = _average(parentUvs);
+    final childCenter = _average(childLocalUvs);
+    final parentSide = _cross2(
+      Offset(targetDx, targetDy),
+      parentCenter - targetA,
+    );
+    final childSide = _cross2(
+      Offset(sourceDx, sourceDy),
+      childCenter - sourceA,
+    );
+    final reflection = parentSide * childSide >= 0 ? -1.0 : 1.0;
+
+    return [
+      for (final point in childLocalUvs)
+        _unfoldPoint(
+          point,
+          sourceA,
+          targetA,
+          sourceUnit,
+          targetUnit,
+          reflection,
+        ),
+    ];
+  }
+
+  Offset _unfoldPoint(
+    Offset point,
+    Offset sourceOrigin,
+    Offset targetOrigin,
+    Offset sourceAxis,
+    Offset targetAxis,
+    double reflection,
+  ) {
+    final relative = point - sourceOrigin;
+    final along = relative.dx * sourceAxis.dx + relative.dy * sourceAxis.dy;
+    final across = _cross2(sourceAxis, relative) * reflection;
+    return Offset(
+      targetOrigin.dx + targetAxis.dx * along - targetAxis.dy * across,
+      targetOrigin.dy + targetAxis.dy * along + targetAxis.dx * across,
+    );
+  }
+
+  _UvChart _createUvChart(Map<int, List<Offset>> faceUvs) {
+    final points = faceUvs.values.expand((uvs) => uvs);
+    final minX = points.map((point) => point.dx).reduce(math.min);
+    final maxX = points.map((point) => point.dx).reduce(math.max);
+    final minY = points.map((point) => point.dy).reduce(math.min);
+    final maxY = points.map((point) => point.dy).reduce(math.max);
+    return _UvChart(faceUvs, minX, minY, maxX, maxY);
+  }
+
+  List<_UvChartPlacement>? _packUvCharts(List<_UvChart> charts) {
+    final gap = math.min(0.012, 0.45 / math.sqrt(charts.length));
+    final sortOrders = <int Function(_UvChart, _UvChart)>[
+      (first, second) => _chartArea(second).compareTo(_chartArea(first)),
+      (first, second) => second.height.compareTo(first.height),
+      (first, second) => second.width.compareTo(first.width),
+    ];
+    final orderedCharts = [
+      for (final compare in sortOrders) [...charts]..sort(compare),
+    ];
+    var low = 0.0;
+    var high = 1.0;
+    List<_UvChartPlacement>? best;
+    for (var iteration = 0; iteration < 22; iteration++) {
+      final scale = (low + high) / 2;
+      List<_UvChartPlacement>? candidate;
+      for (final ordered in orderedCharts) {
+        candidate = _tryPackUvCharts(ordered, scale, gap);
+        if (candidate != null) break;
+      }
+      if (candidate == null) {
+        high = scale;
+      } else {
+        low = scale;
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  List<_UvChartPlacement>? _tryPackUvCharts(
+    List<_UvChart> charts,
+    double scale,
+    double gap,
+  ) {
+    var x = gap;
+    var y = gap;
+    var rowHeight = 0.0;
+    final placements = <_UvChartPlacement>[];
+    for (final chart in charts) {
+      final width = chart.width * scale + gap * 2;
+      final height = chart.height * scale + gap * 2;
+      if (width > 1 || height > 1) return null;
+      if (x + width > 1) {
+        y += rowHeight;
+        x = gap;
+        rowHeight = 0;
+      }
+      if (y + height > 1) return null;
+      placements.add(
+        _UvChartPlacement(chart, x + gap, y + gap, scale),
+      );
+      x += width;
+      rowHeight = math.max(rowHeight, height);
+    }
+    return placements;
+  }
+
+  double _chartArea(_UvChart chart) => chart.width * chart.height;
+
+  Offset _average(List<Offset> points) {
+    if (points.isEmpty) return Offset.zero;
+    return Offset(
+      points.fold<double>(0, (sum, point) => sum + point.dx) / points.length,
+      points.fold<double>(0, (sum, point) => sum + point.dy) / points.length,
+    );
+  }
+
+  double _cross2(Offset first, Offset second) =>
+      first.dx * second.dy - first.dy * second.dx;
+
+  double _dot(Vec3 first, Vec3 second) =>
+      first.x * second.x + first.y * second.y + first.z * second.z;
+
+  Vec3 _subtract(Vec3 first, Vec3 second) =>
+      Vec3(first.x - second.x, first.y - second.y, first.z - second.z);
+
+  Vec3 _scale(Vec3 value, double factor) =>
+      Vec3(value.x * factor, value.y * factor, value.z * factor);
+
+  Vec3 _cross(Vec3 first, Vec3 second) => Vec3(
+        first.y * second.z - first.z * second.y,
+        first.z * second.x - first.x * second.z,
+        first.x * second.y - first.y * second.x,
+      );
 
   bool projectUvFromView(
     Iterable<int> selectedFaces,
