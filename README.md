@@ -2,49 +2,7 @@
 
 **Version 1.1** — Windows and Android polygon modeling build.
 
-Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
-The same app is designed to run on Windows and Android.
-
-## Requirements
-
-- Flutter SDK (Dart 3.3 or later)
-- Windows: Visual Studio with the **Desktop development with C++** workload
-- Windows: enable **Developer Mode** so Flutter can create plugin symlinks
-- Android: Android Studio and an Android SDK; a connected device or emulator for
-  running the app
-
-On Windows, enable Developer Mode in **Settings → System → For developers**
-before running `flutter pub get` (Flutter also offers to open this page with
-`start ms-settings:developers`).
-
-## Set up platform runners
-
-This starter repository contains the shared Flutter app source. Generate the
-native Windows and Android runner projects once from the repository root:
-
-```shell
-flutter create --platforms=windows,android .
-flutter pub get
-```
-
-## Run
-
-```shell
-flutter run -d windows
-```
-
-For Android, list available devices and run on a connected device or emulator:
-
-```shell
-flutter devices
-flutter run -d <device-id>
-```
-
-Run the mesh model tests with:
-
-```shell
-flutter test
-```
+Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter for low-poly 3D asset creation.
 
 ## Modeling basics
 
@@ -196,9 +154,7 @@ rotation angle, and press **Enter** to rotate the selection or active mesh.
 Free view can orbit over and underneath the model.
 
 The app is implemented in Flutter/Dart, which keeps the desktop and Android
-targets on one shared codebase. Python would add a separate runtime and would
-not simplify the existing Flutter UI or platform packaging.
+targets on one shared codebase.
 
 Use **Help → Features** for an overview of modeling tools and platform
-requirements, **Help → Shortcut Keys** for the complete shortcut reference,
-and **Help → About Blunder** for application and creator credits.
+requirements, **Help → Shortcut Keys** for the complete shortcut reference.
