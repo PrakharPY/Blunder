@@ -15,13 +15,13 @@ void main() {
 
     await tester.pumpWidget(const BlunderApp());
     expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title,
-        'Blunder v1.1');
+        'Blunder v1.2');
     expect(find.byKey(const ValueKey('atlasCreatorPanel')), findsOneWidget);
     expect(find.text('ATLAS CREATOR'), findsOneWidget);
     expect(find.text('Maximum size'), findsOneWidget);
-    expect(find.text('Atlas shape'), findsOneWidget);
+    expect(find.text('Atlas shape'), findsNothing);
     expect(find.text('Island padding'), findsOneWidget);
-    expect(find.text('Texture density'), findsOneWidget);
+    expect(find.text('Texture density'), findsNothing);
     expect(find.text('Create Atlas'), findsOneWidget);
     expect(find.byIcon(Icons.build_outlined), findsOneWidget);
   });
@@ -113,7 +113,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('1024 × 1024'), findsOneWidget);
-    expect(find.text('4096 × 4096'), findsOneWidget);
+    expect(find.text('4096 × 4096'), findsNWidgets(2));
   });
 
   testWidgets('exposes mesh selection and atlas controls on narrow screens',
@@ -501,7 +501,7 @@ void main() {
     await tester.pumpWidget(const BlunderApp());
     expect(find.text('0 FPS'), findsOneWidget);
     expect(find.byKey(const ValueKey('fpsCounter')), findsOneWidget);
-    expect(find.text('100%'), findsNWidgets(2));
+    expect(find.text('100%'), findsOneWidget);
     expect(tester.getSize(find.byTooltip('Zoom in')).height, lessThan(28));
     await tester.tap(find.byTooltip('Zoom in'));
     await tester.pumpAndSettle();
@@ -710,7 +710,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('About Blunder'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Blunder v1.1'), findsOneWidget);
+    expect(find.textContaining('Blunder v1.2'), findsOneWidget);
     expect(find.textContaining('Created by -Prakhar Kumar Yadav.'),
         findsOneWidget);
     expect(find.textContaining('Copilot'), findsNothing);
@@ -811,7 +811,7 @@ void main() {
     );
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
     await tester.pumpAndSettle();
-    expect(find.text('100%'), findsNWidgets(2));
+    expect(find.text('100%'), findsOneWidget);
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
     await tester.sendEventToBinding(
@@ -822,7 +822,7 @@ void main() {
     );
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.pumpAndSettle();
-    expect(find.text('100%'), findsNWidgets(2));
+    expect(find.text('100%'), findsOneWidget);
 
     await tester.sendEventToBinding(
       PointerScrollEvent(

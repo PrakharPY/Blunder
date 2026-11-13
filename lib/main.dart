@@ -15,7 +15,7 @@ import 'mesh.dart';
 import 'model_io.dart';
 import 'rv_io.dart';
 
-const String _appVersion = '1.1';
+const String _appVersion = '1.2';
 
 void main(List<String> args) {
   String? initialPkyPath;
@@ -234,10 +234,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
   bool _isRvPanelVisible = true;
   bool _isGeneratingAtlas = false;
   bool _atlasAutoFit = true;
-  int _atlasMaxSize = 2048;
-  int _atlasPadding = 8;
-  double _atlasDensity = 1;
-  AtlasShape _atlasShape = AtlasShape.square;
+  int _atlasMaxSize = 4096;
+  int _atlasPadding = 0;
   int _activeObjectIndex = 0;
   final Set<int> _selectedMeshIndices = {0};
   MeshModel get _mesh => _objects[_activeObjectIndex].mesh;
@@ -3595,10 +3593,31 @@ class _ModelerScreenState extends State<ModelerScreen> {
         textures: sourceSizes,
         maxSize: _atlasMaxSize,
         padding: _atlasPadding,
-        shape: _atlasShape,
-        density: _atlasDensity,
         autoFit: _atlasAutoFit,
       );
+      if (layout.requiresResize) {
+        final shouldContinue = await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Resize textures?'),
+                content: const Text(
+                  'The textures will have to be re-sized. Continue?',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('No'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Yes'),
+                  ),
+                ],
+              ),
+            ) ??
+            false;
+        if (!shouldContinue || !mounted) return;
+      }
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder)
         ..drawColor(Colors.transparent, BlendMode.src);
@@ -4335,8 +4354,10 @@ class _ModelerScreenState extends State<ModelerScreen> {
                       'corners in the UV editor. Atlas Creator combines the '
                       'textures used by selected meshes into one PNG, packs '
                       'each distinct source texture once, and remaps UVs. '
-                      'Configure output shape, maximum size, island padding, '
-                      'texture density, and auto-fit.',
+                      'The square atlas uses the smallest size that fits; '
+                      'choose a maximum size and optional island padding. '
+                      'If source textures must be resized to fit, Blunder '
+                      'asks before continuing.',
                 ),
                 _FeatureSection(
                   title: 'Import and export',
@@ -4840,40 +4861,15 @@ class _ModelerScreenState extends State<ModelerScreen> {
                   onSelected: (size) => setState(() => _atlasMaxSize = size),
                 ),
                 const SizedBox(height: 8),
-                _atlasOption<AtlasShape>(
-                  label: 'Atlas shape',
-                  value: _atlasShape,
-                  options: const [
-                    (AtlasShape.square, 'Square'),
-                    (AtlasShape.landscape, 'Landscape'),
-                    (AtlasShape.portrait, 'Portrait'),
-                  ],
-                  onSelected: (shape) => setState(() => _atlasShape = shape),
-                ),
-                const SizedBox(height: 8),
                 _atlasOption<int>(
                   label: 'Island padding',
                   value: _atlasPadding,
                   options: [
-                    for (final padding in [2, 4, 8, 16])
+                    for (final padding in [0, 2, 4, 8, 16])
                       (padding, '$padding px'),
                   ],
                   onSelected: (padding) =>
                       setState(() => _atlasPadding = padding),
-                ),
-                const SizedBox(height: 8),
-                _atlasOption<double>(
-                  label: 'Texture density',
-                  value: _atlasDensity,
-                  options: const [
-                    (0.5, '50%'),
-                    (0.75, '75%'),
-                    (1, '100%'),
-                    (1.5, '150%'),
-                    (2, '200%'),
-                  ],
-                  onSelected: (density) =>
-                      setState(() => _atlasDensity = density),
                 ),
                 Material(
                   color: Colors.transparent,
@@ -4895,7 +4891,8 @@ class _ModelerScreenState extends State<ModelerScreen> {
                 ),
                 const Text(
                   'Selected meshes only. Source UV layout is preserved and '
-                  'repacked into one PNG.',
+                  'repacked into one square PNG. Resizing is only used when '
+                  'needed to fit the selected maximum.',
                   style: TextStyle(color: Colors.white54, fontSize: 10),
                 ),
               ],

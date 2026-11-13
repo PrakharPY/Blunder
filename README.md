@@ -1,6 +1,6 @@
 # Blunder
 
-**Version 1.1** — Windows and Android polygon modeling build.
+**Version 1.2** — Windows and Android polygon modeling build.
 
 Blunder is a lightweight, beginner-friendly polygon modeler built with Flutter.
 The same app is designed to run on Windows and Android.
@@ -132,11 +132,11 @@ flutter test
   selection. **Enter** confirms UV transforms and **Esc** cancels a transform.
 - Use the **Atlas Creator** panel to combine textures from
   selected visible meshes into one PNG atlas and remap their UVs. Choose a
-  square, landscape, or portrait layout, maximum size, island padding, and
-  texture density; identical source textures are packed only once and
-  auto-fit selects the smallest suitable output size. Hide and restore its
-  panel with the collapse and plus buttons. On touch devices, open **Atlas**
-  from the bottom toolbar.
+  maximum size and optional island padding; identical sources are packed only
+  once, and auto-fit selects the smallest suitable square output. If sources
+  need resizing to fit the selected maximum, Blunder asks before continuing.
+  Hide and restore its panel with the collapse and plus buttons. On touch
+  devices, open **Atlas** from the bottom toolbar.
 - Press **U** or choose **Mesh → UV mapping** for **Project from view** or
   **Smart UV unwrap**. Mapping operates on selected faces and leaves other
   faces' UVs unchanged; with no faces selected it maps the full mesh. In the UV

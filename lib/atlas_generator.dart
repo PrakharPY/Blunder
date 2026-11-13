@@ -1,8 +1,6 @@
 import 'dart:math' as math;
 import 'dart:ui';
 
-enum AtlasShape { square, landscape, portrait }
-
 class AtlasTextureSize {
   const AtlasTextureSize(this.width, this.height);
 
@@ -29,11 +27,13 @@ class AtlasLayout {
     required this.width,
     required this.height,
     required this.regions,
+    this.requiresResize = false,
   });
 
   final int width;
   final int height;
   final List<AtlasRegion> regions;
+  final bool requiresResize;
 }
 
 class AtlasTextureRegistry<T> {
@@ -98,14 +98,13 @@ class AtlasPacker {
     required List<AtlasTextureSize> textures,
     required int maxSize,
     required int padding,
-    required AtlasShape shape,
-    double density = 1,
     bool autoFit = true,
+    bool allowResize = true,
   }) {
     if (textures.isEmpty) {
       throw const FormatException('Choose at least one texture to pack.');
     }
-    if (maxSize < 256 || padding < 0 || !density.isFinite || density <= 0) {
+    if (maxSize < 256 || padding < 0) {
       throw const FormatException('Invalid atlas settings.');
     }
     for (final texture in textures) {
@@ -114,73 +113,121 @@ class AtlasPacker {
       }
     }
 
+    final dimensions =
+        autoFit ? _candidateDimensions(maxSize) : [(maxSize, maxSize)];
+    final originalLayout = _tryPackTextures(
+      textures,
+      dimensions,
+      padding,
+      1,
+    );
+    if (originalLayout != null) return originalLayout;
+    if (!allowResize) {
+      throw _doesNotFit(maxSize, padding);
+    }
+
+    final resizeDimensions = [(maxSize, maxSize)];
+    var low = 0.0;
+    var high = 1.0;
+    AtlasLayout? bestLayout;
+    for (var iteration = 0; iteration < 24; iteration++) {
+      final scale = (low + high) / 2;
+      final resizedLayout = _tryPackTextures(
+        textures,
+        resizeDimensions,
+        padding,
+        scale,
+      );
+      if (resizedLayout == null) {
+        high = scale;
+      } else {
+        low = scale;
+        bestLayout = resizedLayout;
+      }
+    }
+    if (bestLayout == null) throw _doesNotFit(maxSize, padding);
+    return AtlasLayout(
+      width: bestLayout.width,
+      height: bestLayout.height,
+      regions: bestLayout.regions,
+      requiresResize: true,
+    );
+  }
+
+  static FormatException _doesNotFit(int maxSize, int padding) =>
+      FormatException(
+        'The selected textures do not fit within a $maxSize × $maxSize atlas. '
+        '${padding > 0 ? 'Reduce island padding or ' : ''}'
+        'increase the maximum size.',
+      );
+
+  static AtlasLayout? _tryPackTextures(
+    List<AtlasTextureSize> textures,
+    List<(int, int)> dimensions,
+    int padding,
+    double scale,
+  ) {
     final packedTextures = [
       for (var index = 0; index < textures.length; index++)
         _PackedTexture(
           index,
-          math.max(1, (textures[index].width * density).round()) + padding * 2,
-          math.max(1, (textures[index].height * density).round()) + padding * 2,
+          math.max(1, (textures[index].width * scale).round()) + padding * 2,
+          math.max(1, (textures[index].height * scale).round()) + padding * 2,
         ),
-    ]..sort((first, second) {
-        final byArea =
-            second.width * second.height - first.width * first.height;
-        if (byArea != 0) return byArea;
-        return math.max(second.width, second.height) -
-            math.max(first.width, first.height);
-      });
-
-    final dimensions = autoFit
-        ? _candidateDimensions(maxSize, shape)
-        : [
-            switch (shape) {
-              AtlasShape.square => (maxSize, maxSize),
-              AtlasShape.landscape => (maxSize, maxSize ~/ 2),
-              AtlasShape.portrait => (maxSize ~/ 2, maxSize),
-            },
-          ];
+    ];
     for (final (width, height) in dimensions) {
-      final result = _tryPack(packedTextures, width, height, padding);
-      if (result != null) return result;
+      for (final compare in _sortOrders) {
+        final ordered = [...packedTextures]..sort(compare);
+        for (var placementStrategy = 0;
+            placementStrategy < 3;
+            placementStrategy++) {
+          final result = _tryPack(
+            ordered,
+            width,
+            height,
+            padding,
+            placementStrategy,
+          );
+          if (result != null) return result;
+        }
+      }
     }
-    throw FormatException(
-      'The selected textures do not fit within a $maxSize × $maxSize atlas. '
-      'Increase the maximum size, lower texture density, or reduce padding.',
-    );
+    return null;
   }
 
-  static List<(int, int)> _candidateDimensions(
-    int maxSize,
-    AtlasShape shape,
-  ) {
+  static final List<int Function(_PackedTexture, _PackedTexture)> _sortOrders =
+      [
+    (first, second) {
+      final byArea = second.width * second.height - first.width * first.height;
+      if (byArea != 0) return byArea;
+      return math.max(second.width, second.height) -
+          math.max(first.width, first.height);
+    },
+    (first, second) {
+      final byWidth = second.width - first.width;
+      return byWidth != 0 ? byWidth : second.height - first.height;
+    },
+    (first, second) {
+      final byHeight = second.height - first.height;
+      return byHeight != 0 ? byHeight : second.width - first.width;
+    },
+    (first, second) {
+      final firstLongest = math.max(first.width, first.height);
+      final secondLongest = math.max(second.width, second.height);
+      final byLongest = secondLongest - firstLongest;
+      if (byLongest != 0) return byLongest;
+      return second.width * second.height - first.width * first.height;
+    },
+  ];
+
+  static List<(int, int)> _candidateDimensions(int maxSize) {
     final sizes = <int>[];
     for (var size = 256; size <= maxSize; size *= 2) {
       sizes.add(size);
       if (size > maxSize ~/ 2) break;
     }
     if (!sizes.contains(maxSize)) sizes.add(maxSize);
-    final result = <(int, int)>[];
-    for (final width in sizes) {
-      for (final height in sizes) {
-        final matches = switch (shape) {
-          AtlasShape.square => width == height,
-          AtlasShape.landscape => width >= height,
-          AtlasShape.portrait => height >= width,
-        };
-        if (matches) result.add((width, height));
-      }
-    }
-    result.sort((first, second) {
-      final areaOrder = first.$1 * first.$2 - second.$1 * second.$2;
-      if (areaOrder != 0) return areaOrder;
-      return switch (shape) {
-        AtlasShape.square => first.$1.compareTo(second.$1),
-        AtlasShape.landscape =>
-          (second.$1 - second.$2).compareTo(first.$1 - first.$2),
-        AtlasShape.portrait =>
-          (second.$2 - second.$1).compareTo(first.$2 - first.$1),
-      };
-    });
-    return result;
+    return [for (final size in sizes) (size, size)];
   }
 
   static AtlasLayout? _tryPack(
@@ -188,6 +235,7 @@ class AtlasPacker {
     int width,
     int height,
     int padding,
+    int placementStrategy,
   ) {
     final freeRects = <_Rect>[_Rect(0, 0, width, height)];
     final packedRegions = List<AtlasRegion?>.filled(textures.length, null);
@@ -201,13 +249,23 @@ class AtlasPacker {
         final remainingHeight = free.height - texture.height;
         final shortFit = math.min(remainingWidth, remainingHeight);
         final longFit = math.max(remainingWidth, remainingHeight);
+        final primaryScore = switch (placementStrategy) {
+          0 => shortFit,
+          1 => free.area - texture.width * texture.height,
+          _ => free.y + texture.height,
+        };
+        final secondaryScore = switch (placementStrategy) {
+          0 => longFit,
+          1 => shortFit,
+          _ => free.x,
+        };
         if (best == null ||
-            shortFit < best.shortFit ||
-            (shortFit == best.shortFit && longFit < best.longFit)) {
+            primaryScore < best.shortFit ||
+            (primaryScore == best.shortFit && secondaryScore < best.longFit)) {
           best = _Placement(
             _Rect(free.x, free.y, texture.width, texture.height),
-            shortFit,
-            longFit,
+            primaryScore,
+            secondaryScore,
           );
         }
       }

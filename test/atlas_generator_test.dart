@@ -24,18 +24,17 @@ void main() {
           AtlasTextureSize(128, 256),
         ],
         maxSize: 2048,
-        padding: 8,
-        shape: AtlasShape.square,
+        padding: 0,
       );
 
       expect(layout.width, layout.height);
       expect(layout.width, lessThan(2048));
       expect(layout.regions, hasLength(3));
       for (final region in layout.regions) {
-        expect(region.x, greaterThanOrEqualTo(8));
-        expect(region.y, greaterThanOrEqualTo(8));
-        expect(region.x + region.width, lessThanOrEqualTo(layout.width - 8));
-        expect(region.y + region.height, lessThanOrEqualTo(layout.height - 8));
+        expect(region.x, greaterThanOrEqualTo(0));
+        expect(region.y, greaterThanOrEqualTo(0));
+        expect(region.x + region.width, lessThanOrEqualTo(layout.width));
+        expect(region.y + region.height, lessThanOrEqualTo(layout.height));
       }
       for (var first = 0; first < layout.regions.length; first++) {
         for (var second = first + 1; second < layout.regions.length; second++) {
@@ -45,29 +44,112 @@ void main() {
       }
     });
 
-    test('supports fixed landscape and portrait shapes and density', () {
-      final landscape = AtlasPacker.pack(
-        textures: const [AtlasTextureSize(128, 256)],
-        maxSize: 1024,
-        padding: 4,
-        shape: AtlasShape.landscape,
-        autoFit: false,
+    test('fits four unchanged 512px textures in a 1024px square', () {
+      final layout = AtlasPacker.pack(
+        textures: const [
+          AtlasTextureSize(512, 512),
+          AtlasTextureSize(512, 512),
+          AtlasTextureSize(512, 512),
+          AtlasTextureSize(512, 512),
+        ],
+        maxSize: 4096,
+        padding: 0,
       );
-      final portrait = AtlasPacker.pack(
-        textures: const [AtlasTextureSize(128, 256)],
+
+      expect((layout.width, layout.height), (1024, 1024));
+      expect(
+        layout.regions.map((region) => (region.width, region.height)),
+        everyElement((512, 512)),
+      );
+      expect(_regionsDoNotOverlap(layout.regions), isTrue);
+    });
+
+    test('packs three 2048px and two 1024px textures in a 4096 square', () {
+      final layout = AtlasPacker.pack(
+        textures: const [
+          AtlasTextureSize(2048, 2048),
+          AtlasTextureSize(2048, 2048),
+          AtlasTextureSize(2048, 2048),
+          AtlasTextureSize(1024, 1024),
+          AtlasTextureSize(1024, 1024),
+        ],
+        maxSize: 4096,
+        padding: 0,
+      );
+
+      expect((layout.width, layout.height), (4096, 4096));
+      expect(
+        layout.regions.map((region) => (region.width, region.height)),
+        [
+          (2048, 2048),
+          (2048, 2048),
+          (2048, 2048),
+          (1024, 1024),
+          (1024, 1024),
+        ],
+      );
+      expect(_regionsDoNotOverlap(layout.regions), isTrue);
+    });
+
+    test('resizes source textures proportionally to fit a fixed atlas size',
+        () {
+      final layout = AtlasPacker.pack(
+        textures: const [
+          AtlasTextureSize(2048, 2048),
+          AtlasTextureSize(2048, 2048),
+          AtlasTextureSize(2048, 2048),
+          AtlasTextureSize(1024, 1024),
+          AtlasTextureSize(1024, 1024),
+        ],
         maxSize: 1024,
-        padding: 4,
-        shape: AtlasShape.portrait,
-        density: 0.5,
+        padding: 0,
+      );
+
+      expect((layout.width, layout.height), (1024, 1024));
+      expect(layout.requiresResize, isTrue);
+      expect(
+        layout.regions.map((region) => (region.width, region.height)),
+        [
+          (512, 512),
+          (512, 512),
+          (512, 512),
+          (256, 256),
+          (256, 256),
+        ],
+      );
+      expect(_regionsDoNotOverlap(layout.regions), isTrue);
+    });
+
+    test('keeps source textures unchanged when they fit the selected size', () {
+      final layout = AtlasPacker.pack(
+        textures: const [
+          AtlasTextureSize(512, 512),
+          AtlasTextureSize(512, 512),
+        ],
+        maxSize: 1024,
+        padding: 0,
         autoFit: false,
       );
 
-      expect(landscape.width, 1024);
-      expect(landscape.height, 512);
-      expect(portrait.width, 512);
-      expect(portrait.height, 1024);
-      expect(portrait.regions.single.width, 64);
-      expect(portrait.regions.single.height, 128);
+      expect(layout.requiresResize, isFalse);
+      expect(
+        layout.regions.map((region) => (region.width, region.height)),
+        everyElement((512, 512)),
+      );
+    });
+
+    test('padding reserves gutters without resizing source textures', () {
+      final layout = AtlasPacker.pack(
+        textures: const [AtlasTextureSize(128, 256)],
+        maxSize: 1024,
+        padding: 8,
+      );
+
+      expect((layout.width, layout.height), (512, 512));
+      expect(layout.regions.single.width, 128);
+      expect(layout.regions.single.height, 256);
+      expect(layout.regions.single.x, 8);
+      expect(layout.regions.single.y, 8);
     });
 
     test('remaps UVs into a texture region with the renderer V convention', () {
@@ -92,7 +174,7 @@ void main() {
           textures: const [AtlasTextureSize(4096, 256)],
           maxSize: 512,
           padding: 8,
-          shape: AtlasShape.square,
+          allowResize: false,
         ),
         throwsA(isA<FormatException>()),
       );
@@ -105,3 +187,12 @@ bool _overlaps(AtlasRegion first, AtlasRegion second) =>
     first.x + first.width > second.x &&
     first.y < second.y + second.height &&
     first.y + first.height > second.y;
+
+bool _regionsDoNotOverlap(List<AtlasRegion> regions) {
+  for (var first = 0; first < regions.length; first++) {
+    for (var second = first + 1; second < regions.length; second++) {
+      if (_overlaps(regions[first], regions[second])) return false;
+    }
+  }
+  return true;
+}
